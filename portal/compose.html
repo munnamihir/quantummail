@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>QuantumMail — Compose</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="header">
+    <div class="brand">
+      <img src="./assets/logo.png" alt="QuantumMail" />
+      <div>
+        QuantumMail <span class="badge">MVP demo</span>
+      </div>
+    </div>
+    <div style="flex:1"></div>
+    <a class="btn secondary" href="./keygen.html">Generate PQC Keys</a>
+  </div>
+
+  <div class="wrap">
+    <div class="grid">
+      <div class="card">
+        <h2>Create a secure message link</h2>
+        <p>Encrypt in the browser, store only ciphertext on the server, share a link in any email client.</p>
+
+        <label for="message">Message</label>
+        <textarea id="message" placeholder="Paste your email body here..."></textarea>
+
+        <div class="hr"></div>
+
+        <label>Encryption mode</label>
+        <div class="row" style="align-items:flex-start; gap:14px">
+          <div style="flex:1">
+            <label style="margin:0">
+              <input type="radio" name="mode" value="pqc" checked />
+              <strong>Quantum-safe (PQC key exchange)</strong>
+            </label>
+            <p class="notice">Uses <strong>ML-KEM-768</strong> to encapsulate an <strong>AES-256-GCM</strong> key to the recipient’s public key.</p>
+          </div>
+          <div style="flex:1">
+            <label style="margin:0">
+              <input type="radio" name="mode" value="passphrase" />
+              <strong>Passphrase</strong>
+            </label>
+            <p class="notice">Derives an AES key via <strong>PBKDF2</strong>. Good for quick sharing with external recipients.</p>
+          </div>
+        </div>
+
+        <div id="pqcFields">
+          <label for="recipientPk">Recipient public key (base64)</label>
+          <input id="recipientPk" placeholder="Paste recipient public key from Keygen page" />
+        </div>
+
+        <div id="pwFields" style="display:none">
+          <label for="passphrase">Passphrase</label>
+          <input id="passphrase" placeholder="Strong passphrase — share via separate channel" />
+        </div>
+
+        <div class="row" style="margin-top:14px">
+          <button id="encryptBtn" class="btn">Encrypt & Generate Link</button>
+          <button id="clearBtn" class="btn secondary">Clear</button>
+        </div>
+
+        <div class="hr"></div>
+
+        <div>
+          <label>Result</label>
+          <div id="result" class="out">—</div>
+          <div class="row" style="margin-top:10px">
+            <button id="copyBtn" class="btn secondary">Copy link</button>
+            <span id="status" class="notice"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>How it works</h2>
+        <p><strong>1)</strong> You encrypt locally in your browser.</p>
+        <p><strong>2)</strong> Server stores only encrypted bytes (no keys).</p>
+        <p><strong>3)</strong> Recipient opens the link and decrypts locally.</p>
+        <div class="hr"></div>
+        <p class="notice">
+          <strong>Security note:</strong> This repo is a demo MVP and has not been audited.
+          Use it for demos/pilots, not for production sensitive data.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./compose.js"></script>
+</body>
+</html>
