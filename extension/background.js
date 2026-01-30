@@ -99,24 +99,22 @@ async function encryptAndUpload({ plaintext, mode, recipientPkB64, passphrase, s
   return storeMessage(serverBase, payload);
 }
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg?.type !== 'QM_ENCRYPT') return;
-
-  (async () => {
-    try {
-      const res = await encryptAndUpload(msg.payload);
-      sendResponse({ ok: true, ...res });
-    } catch (err) {
-      sendResponse({ ok: false, error: err.message || 'Failed' });
-    }
-  })();
-
-  return true; // keep channel open
-});
-
-// Initialize defaults
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.storage.sync.get({ serverBase: 'http://localhost:5173' }, (v) => {
-    chrome.storage.sync.set(v);
-  });
+  console.log("QuantumMail service worker installed");
 });
+
+// optional: respond to content script messages
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type === "PING") {
+    sendResponse({ ok: true, from: "background" });
+    return true;
+  }
+
+  if (msg?.type === "OPEN_PORTAL") {
+    // Opens your portal (works for local dev)
+    chrome.tabs.create({ url: "http://localhost:5173/portal/compose.html" });
+    sendResponse({ ok: true });
+    return true;
+  }
+});
+
