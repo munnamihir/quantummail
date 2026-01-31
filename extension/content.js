@@ -1,5 +1,10 @@
 // content.js
-// Gets selection and replaces selection inside Gmail/Outlook compose editor.
+// QuantumMail: supports encrypt/decrypt for BOTH compose mode (contenteditable editor)
+// and read mode (opened email). It can:
+//  - GET_SELECTION: return selected text anywhere on the page
+//  - REPLACE_SELECTION: replace selection in compose editor if present, otherwise replace selection in read mode
+//
+// Works on Gmail + Outlook (web). Designed for MV3 dynamic injection.
 
 (() => {
   const EXT = "QuantumMail";
@@ -7,13 +12,18 @@
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+  // ---------- Site checks ----------
   function isGmail() {
     return location.hostname === "mail.google.com";
   }
   function isOutlook() {
-    return location.hostname === "outlook.office.com" || location.hostname === "outlook.live.com";
+    return (
+      location.hostname === "outlook.office.com" ||
+      location.hostname === "outlook.live.com"
+    );
   }
 
+  // ---------- Compose editor detection ----------
   function findGmailEditor() {
     return (
       document.querySelector('div[role="textbox"][aria-label="Message Body"]') ||
@@ -23,20 +33,24 @@
   }
 
   function findOutlookEditor() {
+    // Outlook editor is usually contenteditable with role="textbox"
     const candidates = Array.from(
       document.querySelectorAll('div[contenteditable="true"][role="textbox"]')
     ).filter((el) => {
       const r = el.getBoundingClientRect();
       return r.width > 50 && r.height > 50;
     });
+
     if (candidates.length) return candidates[0];
 
-    const fallback = Array.from(document.querySelectorAll('div[contenteditable="true"]')).filter(
-      (el) => {
-        const r = el.getBoundingClientRect();
-        return r.width > 50 && r.height > 50;
-      }
-    );
+    // Fallback: any visible contenteditable
+    const fallback = Array.from(
+      document.querySelectorAll('div[contenteditable="true"]')
+    ).filter((el) => {
+      const r = el.getBoundingClientRect();
+      return r.width > 50 && r.height > 50;
+    });
+
     return fallback[0] || null;
   }
 
@@ -56,42 +70,81 @@
     return editor;
   }
 
+  // ---------- Selection helpers ----------
   function getSelectedText() {
     const sel = window.getSelection?.();
     return String(sel ? sel.toString() : "");
   }
 
+  // Replace selection *inside compose editor* (contenteditable).
+  // If the selection is not inside the editor, caret is moved to the end and text is inserted there.
   function replaceSelectionInEditor(editorEl, replacementText) {
-    editorEl.focus();
+    try {
+      editorEl.focus();
 
-    const sel = window.getSelection?.();
-    if (!sel) return { ok: false, error: "Selection API not available" };
+      const sel = window.getSelection?.();
+      if (!sel) return { ok: false, error: "Selection API not available" };
 
-    // If selection isn't inside editor, move caret to end
-    if (sel.rangeCount === 0 || !editorEl.contains(sel.getRangeAt(0).commonAncestorContainer)) {
-      const endRange = document.createRange();
-      endRange.selectNodeContents(editorEl);
-      endRange.collapse(false);
+      // If selection isn't inside editor, move caret to end
+      if (
+        sel.rangeCount === 0 ||
+        !editorEl.contains(sel.getRangeAt(0).commonAncestorContainer)
+      ) {
+        const endRange = document.createRange();
+        endRange.selectNodeContents(editorEl);
+        endRange.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(endRange);
+      }
+
+      const range = sel.getRangeAt(0);
+      range.deleteContents();
+
+      const node = document.createTextNode(String(replacementText ?? ""));
+      range.insertNode(node);
+
+      // Move caret after inserted node
+      range.setStartAfter(node);
+      range.setEndAfter(node);
       sel.removeAllRanges();
-      sel.addRange(endRange);
+      sel.addRange(range);
+
+      // Notify SPA editor
+      editorEl.dispatchEvent(new InputEvent("input", { bubbles: true }));
+      return { ok: true, mode: "compose" };
+    } catch (e) {
+      return { ok: false, error: String(e?.message || e) };
     }
-
-    const range = sel.getRangeAt(0);
-    range.deleteContents();
-
-    const node = document.createTextNode(String(replacementText ?? ""));
-    range.insertNode(node);
-
-    // move caret after node
-    range.setStartAfter(node);
-    range.setEndAfter(node);
-    sel.removeAllRanges();
-    sel.addRange(range);
-
-    editorEl.dispatchEvent(new InputEvent("input", { bubbles: true }));
-    return { ok: true };
   }
 
+  // Replace selection anywhere on page (read mode).
+  // This does NOT require a compose editor; it just replaces the DOM selection with text.
+  function replaceSelectionAnywhere(replacementText) {
+    try {
+      const sel = window.getSelection?.();
+      if (!sel || sel.rangeCount === 0) {
+        return { ok: false, error: "No selection found. Highlight the token/text first." };
+      }
+
+      const range = sel.getRangeAt(0);
+      range.deleteContents();
+
+      const node = document.createTextNode(String(replacementText ?? ""));
+      range.insertNode(node);
+
+      // Move caret after inserted node
+      range.setStartAfter(node);
+      range.setEndAfter(node);
+      sel.removeAllRanges();
+      sel.addRange(range);
+
+      return { ok: true, mode: "read" };
+    } catch (e) {
+      return { ok: false, error: String(e?.message || e) };
+    }
+  }
+
+  // ---------- Message API ----------
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       try {
@@ -106,15 +159,27 @@
         }
 
         if (msg.type === "REPLACE_SELECTION") {
-          const editor = await waitForEditor(15000);
-          if (!editor) {
-            sendResponse({
-              ok: false,
-              error: "Compose editor not found. Click Compose and select text inside message body."
-            });
+          const text = String(msg.text ?? "");
+
+          // First try compose editor (short wait)
+          const editor = await waitForEditor(1500);
+          if (editor) {
+            sendResponse(replaceSelectionInEditor(editor, text));
             return;
           }
-          sendResponse(replaceSelectionInEditor(editor, msg.text ?? ""));
+
+          // Fallback: replace selection in read mode
+          sendResponse(replaceSelectionAnywhere(text));
+          return;
+        }
+
+        if (msg.type === "PING") {
+          sendResponse({
+            ok: true,
+            from: "content",
+            href: location.href,
+            host: location.hostname
+          });
           return;
         }
 
@@ -124,7 +189,7 @@
       }
     })();
 
-    return true;
+    return true; // async sendResponse
   });
 
   log("content script loaded", location.href);
