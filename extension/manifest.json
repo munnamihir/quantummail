@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
   "name": "QuantumMail (MVP)",
-  "version": "0.2.0",
-  "description": "Quantum-safe secure message links you can paste into email (encrypt/decrypt MVP).",
+  "version": "0.3.0",
+  "description": "Encrypt/decrypt selected text in Gmail/Outlook using a QuantumMail token.",
   "action": {
-    "default_title": "QuantumMail Encrypt/Decrypt"
+    "default_title": "QuantumMail",
+    "default_popup": "popup.html"
   },
   "permissions": ["storage", "tabs", "activeTab", "scripting"],
   "host_permissions": [
