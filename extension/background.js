@@ -1,120 +1,230 @@
-import mlkem from './vendor/mlkem.js';
+// background.js (MV3 service worker, type=module)
+// QuantumMail MVP: click icon -> encrypt/decrypt selected text in Gmail/Outlook.
 
-const te = new TextEncoder();
-const td = new TextDecoder();
+const EXT = "QuantumMail";
+const log = (...args) => console.log(`[${EXT} BG]`, ...args);
 
-function abToB64(ab) {
-  const bytes = new Uint8Array(ab);
-  let bin = '';
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
+const SUPPORTED_HOSTS = new Set([
+  "mail.google.com",
+  "outlook.office.com",
+  "outlook.live.com",
+]);
+
+function parseUrl(url) {
+  try {
+    return new URL(url);
+  } catch {
+    return null;
   }
-  return btoa(bin);
 }
 
-function b64ToAb(b64) {
+function isSupportedTab(tab) {
+  const u = parseUrl(tab?.url || "");
+  return !!u && u.protocol === "https:" && SUPPORTED_HOSTS.has(u.hostname);
+}
+
+async function getActiveTab() {
+  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  return tabs?.[0] || null;
+}
+
+async function findAnySupportedTab() {
+  const matches = await chrome.tabs.query({
+    url: [
+      "https://mail.google.com/*",
+      "https://outlook.office.com/*",
+      "https://outlook.live.com/*"
+    ]
+  });
+  return matches?.find((t) => t?.id) || null;
+}
+
+async function ensureContentScript(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ["content.js"],
+  });
+}
+
+function sendToTab(tabId, message) {
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+      resolve({ response, lastError: chrome.runtime.lastError });
+    });
+  });
+}
+
+async function sendWithInject(tabId, message) {
+  // Try once
+  let res = await sendToTab(tabId, message);
+
+  // If receiver missing, inject and retry
+  if (res?.lastError?.message?.includes("Receiving end does not exist")) {
+    log("Receiver missing; injecting content.js then retrying...");
+    await ensureContentScript(tabId);
+    res = await sendToTab(tabId, message);
+  }
+
+  return res;
+}
+
+async function pickTargetTab() {
+  const active = await getActiveTab();
+  if (active?.id && isSupportedTab(active)) return active;
+
+  const any = await findAnySupportedTab();
+  if (any?.id && isSupportedTab(any)) return any;
+
+  return null;
+}
+
+// Clicking the toolbar icon runs encrypt/decrypt on selection
+chrome.action.onClicked.addListener(async () => {
+  try {
+    const tab = await pickTargetTab();
+    if (!tab?.id) {
+      log("No Gmail/Outlook tab found. Open Gmail/Outlook and try again.");
+      return;
+    }
+
+    // Ask content script what is selected
+    const selRes = await sendWithInject(tab.id, { type: "GET_SELECTION" });
+    if (selRes.lastError) {
+      log("GET_SELECTION error:", selRes.lastError.message);
+      return;
+    }
+
+    const selectedText = (selRes.response?.selectedText || "").trim();
+    if (!selectedText) {
+      log("Nothing selected. Highlight text/token in the compose area first.");
+      return;
+    }
+
+    // Ask for passphrase (MVP). Note: prompt is available in SW in most cases,
+    // but if it is blocked in your environment, tell me and I'll add a tiny popup.
+    const passphrase = globalThis.prompt?.("QuantumMail passphrase (same for decrypt):", "");
+    if (!passphrase) {
+      log("No passphrase entered.");
+      return;
+    }
+
+    const isToken = selectedText.startsWith("qm://v1#");
+
+    if (isToken) {
+      // DECRYPT selection -> replace selection with plaintext
+      const { plaintext } = await decryptToken(selectedText, passphrase);
+      const rep = await sendWithInject(tab.id, {
+        type: "REPLACE_SELECTION",
+        text: plaintext,
+      });
+
+      if (rep.lastError) log("REPLACE_SELECTION error:", rep.lastError.message);
+      else log("Decrypted + replaced selection.");
+    } else {
+      // ENCRYPT selection -> replace selection with token
+      const token = await encryptText(selectedText, passphrase);
+      const rep = await sendWithInject(tab.id, {
+        type: "REPLACE_SELECTION",
+        text: token,
+      });
+
+      if (rep.lastError) log("REPLACE_SELECTION error:", rep.lastError.message);
+      else log("Encrypted + replaced selection.");
+    }
+  } catch (e) {
+    log("onClicked exception:", e);
+  }
+});
+
+// ---------- CRYPTO (AES-GCM + PBKDF2) ----------
+
+function b64urlToBytes(b64url) {
+  const pad = "=".repeat((4 - (b64url.length % 4)) % 4);
+  const b64 = (b64url + pad).replace(/-/g, "+").replace(/_/g, "/");
   const bin = atob(b64);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes.buffer;
+  return bytes;
 }
 
-function randBytes(len) {
-  const b = new Uint8Array(len);
-  crypto.getRandomValues(b);
-  return b;
+function bytesToB64url(bytes) {
+  let bin = "";
+  bytes.forEach((b) => (bin += String.fromCharCode(b)));
+  const b64 = btoa(bin);
+  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
-async function deriveAesKeyFromPassphrase(passphrase, saltB, iterations = 200000) {
-  const baseKey = await crypto.subtle.importKey('raw', te.encode(passphrase), 'PBKDF2', false, ['deriveKey']);
-  return crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt: saltB, iterations, hash: 'SHA-256' },
-    baseKey,
-    { name: 'AES-GCM', length: 256 },
+async function deriveKey(passphrase, saltBytes) {
+  const enc = new TextEncoder();
+  const baseKey = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(passphrase),
+    "PBKDF2",
     false,
-    ['encrypt', 'decrypt']
+    ["deriveKey"]
+  );
+
+  return crypto.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      salt: saltBytes,
+      iterations: 200_000,
+      hash: "SHA-256",
+    },
+    baseKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
   );
 }
 
-async function aesGcmEncrypt(aesKey, plaintext) {
-  const iv = randBytes(12);
-  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, te.encode(plaintext));
-  return { iv, ct };
+function parseToken(token) {
+  const t = String(token || "").trim();
+  const prefix = "qm://v1#";
+  const payloadPart = t.startsWith(prefix) ? t.slice(prefix.length) : t;
+  if (!payloadPart) throw new Error("Missing token payload");
+
+  const payloadBytes = b64urlToBytes(payloadPart);
+  const json = new TextDecoder().decode(payloadBytes);
+  const obj = JSON.parse(json);
+
+  if (!obj?.salt || !obj?.iv || !obj?.ct) throw new Error("Invalid token format");
+  return obj; // {salt, iv, ct}
 }
 
-async function storeMessage(serverBase, payload) {
-  const res = await fetch(`${serverBase.replace(/\/$/, '')}/api/messages`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
-  });
-  if (!res.ok) {
-    let msg = `Server error (${res.status})`;
-    try {
-      const j = await res.json();
-      msg = j.error || msg;
-    } catch {}
-    throw new Error(msg);
-  }
-  return res.json();
-}
+async function encryptText(plaintext, passphrase) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveKey(passphrase, salt);
 
-async function encryptAndUpload({ plaintext, mode, recipientPkB64, passphrase, serverBase }) {
-  if (!serverBase) serverBase = 'http://localhost:5173';
-  let aesKey;
-  let kemCiphertextB64;
-  let saltB64;
+  const ptBytes = new TextEncoder().encode(String(plaintext));
+  const ctBuf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, ptBytes);
+  const ct = new Uint8Array(ctBuf);
 
-  if (mode === 'pqc') {
-    if (!recipientPkB64) throw new Error('Missing recipient public key');
-    const recipientPk = await mlkem.importKey('raw-public', b64ToAb(recipientPkB64), { name: 'ML-KEM-768' }, true, ['encapsulateKey']);
-    const enc = await mlkem.encapsulateKey(
-      { name: 'ML-KEM-768' },
-      recipientPk,
-      { name: 'AES-GCM', length: 256 },
-      true,
-      ['encrypt', 'decrypt']
-    );
-    aesKey = enc.sharedKey;
-    kemCiphertextB64 = abToB64(enc.ciphertext);
-  } else {
-    if (!passphrase) throw new Error('Missing passphrase');
-    const salt = randBytes(16);
-    saltB64 = abToB64(salt.buffer);
-    aesKey = await deriveAesKeyFromPassphrase(passphrase, salt, 200000);
-  }
-
-  const { iv, ct } = await aesGcmEncrypt(aesKey, plaintext);
-
-  const payload = {
-    mode,
-    alg: 'AES-256-GCM',
-    iv: abToB64(iv.buffer),
-    ciphertext: abToB64(ct),
-    ...(saltB64 ? { salt: saltB64, kdf: 'PBKDF2-SHA256', kdfIterations: '200000' } : {}),
-    ...(kemCiphertextB64 ? { kem: { alg: 'ML-KEM-768', ciphertext: kemCiphertextB64 } } : {})
+  const payloadObj = {
+    salt: bytesToB64url(salt),
+    iv: bytesToB64url(iv),
+    ct: bytesToB64url(ct),
   };
 
-  return storeMessage(serverBase, payload);
+  const payloadJson = JSON.stringify(payloadObj);
+  const payloadB64url = bytesToB64url(new TextEncoder().encode(payloadJson));
+  return `qm://v1#${payloadB64url}`;
 }
 
-chrome.runtime.onInstalled.addListener(() => {
-  console.log("QuantumMail service worker installed");
-});
+async function decryptToken(token, passphrase) {
+  const { salt, iv, ct } = parseToken(token);
 
-// optional: respond to content script messages
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg?.type === "PING") {
-    sendResponse({ ok: true, from: "background" });
-    return true;
-  }
+  const saltBytes = b64urlToBytes(salt);
+  const ivBytes = b64urlToBytes(iv);
+  const ctBytes = b64urlToBytes(ct);
 
-  if (msg?.type === "OPEN_PORTAL") {
-    // Opens your portal (works for local dev)
-    chrome.tabs.create({ url: "http://localhost:5173/portal/compose.html" });
-    sendResponse({ ok: true });
-    return true;
-  }
-});
+  const key = await deriveKey(passphrase, saltBytes);
 
+  const ptBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv: ivBytes }, key, ctBytes);
+  const plaintext = new TextDecoder().decode(ptBuf);
+
+  return { plaintext };
+}
+
+log("Service worker loaded");
