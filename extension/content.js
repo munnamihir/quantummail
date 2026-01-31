@@ -1,5 +1,5 @@
 // content.js
-// QuantumMail MVP content script: get selection + replace selection in compose editor.
+// Gets selection and replaces selection inside Gmail/Outlook compose editor.
 
 (() => {
   const EXT = "QuantumMail";
@@ -10,15 +10,10 @@
   function isGmail() {
     return location.hostname === "mail.google.com";
   }
-
   function isOutlook() {
-    return (
-      location.hostname === "outlook.office.com" ||
-      location.hostname === "outlook.live.com"
-    );
+    return location.hostname === "outlook.office.com" || location.hostname === "outlook.live.com";
   }
 
-  // Find compose editor (best effort)
   function findGmailEditor() {
     return (
       document.querySelector('div[role="textbox"][aria-label="Message Body"]') ||
@@ -34,7 +29,6 @@
       const r = el.getBoundingClientRect();
       return r.width > 50 && r.height > 50;
     });
-
     if (candidates.length) return candidates[0];
 
     const fallback = Array.from(document.querySelectorAll('div[contenteditable="true"]')).filter(
@@ -43,7 +37,6 @@
         return r.width > 50 && r.height > 50;
       }
     );
-
     return fallback[0] || null;
   }
 
@@ -65,17 +58,16 @@
 
   function getSelectedText() {
     const sel = window.getSelection?.();
-    const txt = sel ? sel.toString() : "";
-    return String(txt || "");
+    return String(sel ? sel.toString() : "");
   }
 
   function replaceSelectionInEditor(editorEl, replacementText) {
     editorEl.focus();
 
     const sel = window.getSelection?.();
-    if (!sel) return { ok: false, error: "No selection API available" };
+    if (!sel) return { ok: false, error: "Selection API not available" };
 
-    // If selection isn't inside editor, move caret to end (and insert)
+    // If selection isn't inside editor, move caret to end
     if (sel.rangeCount === 0 || !editorEl.contains(sel.getRangeAt(0).commonAncestorContainer)) {
       const endRange = document.createRange();
       endRange.selectNodeContents(editorEl);
@@ -84,20 +76,18 @@
       sel.addRange(endRange);
     }
 
-    // Replace current selection
     const range = sel.getRangeAt(0);
     range.deleteContents();
 
     const node = document.createTextNode(String(replacementText ?? ""));
     range.insertNode(node);
 
-    // Move caret after inserted node
+    // move caret after node
     range.setStartAfter(node);
     range.setEndAfter(node);
     sel.removeAllRanges();
     sel.addRange(range);
 
-    // Notify SPA editor
     editorEl.dispatchEvent(new InputEvent("input", { bubbles: true }));
     return { ok: true };
   }
@@ -110,29 +100,21 @@
           return;
         }
 
-        if (msg.type === "PING") {
-          sendResponse({ ok: true, from: "content", url: location.href });
-          return;
-        }
-
         if (msg.type === "GET_SELECTION") {
           sendResponse({ ok: true, selectedText: getSelectedText() });
           return;
         }
 
         if (msg.type === "REPLACE_SELECTION") {
-          const text = String(msg.text ?? "");
           const editor = await waitForEditor(15000);
           if (!editor) {
             sendResponse({
               ok: false,
-              error: "Compose editor not found. Click Compose first, then select text inside it.",
+              error: "Compose editor not found. Click Compose and select text inside message body."
             });
             return;
           }
-
-          const res = replaceSelectionInEditor(editor, text);
-          sendResponse(res);
+          sendResponse(replaceSelectionInEditor(editor, msg.text ?? ""));
           return;
         }
 
