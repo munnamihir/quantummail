@@ -7,10 +7,7 @@ function setStatus(msg) {
 
 async function run(mode) {
   const passphrase = (passEl.value || "").trim();
-  if (!passphrase) {
-    setStatus("Enter a passphrase first.");
-    return;
-  }
+  if (!passphrase) return setStatus("Enter a passphrase first.");
 
   setStatus("Working...");
 
@@ -20,10 +17,7 @@ async function run(mode) {
     passphrase
   });
 
-  if (!res?.ok) {
-    setStatus(`Error: ${res?.error || "Unknown error"}`);
-    return;
-  }
+  if (!res?.ok) return setStatus(`Error: ${res?.error || "Unknown error"}`);
 
   setStatus(res.message || "Done.");
 }
