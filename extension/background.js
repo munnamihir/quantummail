@@ -1,5 +1,4 @@
 // background.js (MV3 service worker, type=module)
-// QuantumMail MVP: click icon -> encrypt/decrypt selected text in Gmail/Outlook.
 
 const EXT = "QuantumMail";
 const log = (...args) => console.log(`[${EXT} BG]`, ...args);
@@ -11,11 +10,7 @@ const SUPPORTED_HOSTS = new Set([
 ]);
 
 function parseUrl(url) {
-  try {
-    return new URL(url);
-  } catch {
-    return null;
-  }
+  try { return new URL(url); } catch { return null; }
 }
 
 function isSupportedTab(tab) {
@@ -26,17 +21,6 @@ function isSupportedTab(tab) {
 async function getActiveTab() {
   const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   return tabs?.[0] || null;
-}
-
-async function findAnySupportedTab() {
-  const matches = await chrome.tabs.query({
-    url: [
-      "https://mail.google.com/*",
-      "https://outlook.office.com/*",
-      "https://outlook.live.com/*"
-    ]
-  });
-  return matches?.find((t) => t?.id) || null;
 }
 
 async function ensureContentScript(tabId) {
@@ -55,89 +39,16 @@ function sendToTab(tabId, message) {
 }
 
 async function sendWithInject(tabId, message) {
-  // Try once
   let res = await sendToTab(tabId, message);
-
-  // If receiver missing, inject and retry
   if (res?.lastError?.message?.includes("Receiving end does not exist")) {
     log("Receiver missing; injecting content.js then retrying...");
     await ensureContentScript(tabId);
     res = await sendToTab(tabId, message);
   }
-
   return res;
 }
 
-async function pickTargetTab() {
-  const active = await getActiveTab();
-  if (active?.id && isSupportedTab(active)) return active;
-
-  const any = await findAnySupportedTab();
-  if (any?.id && isSupportedTab(any)) return any;
-
-  return null;
-}
-
-// Clicking the toolbar icon runs encrypt/decrypt on selection
-chrome.action.onClicked.addListener(async () => {
-  try {
-    const tab = await pickTargetTab();
-    if (!tab?.id) {
-      log("No Gmail/Outlook tab found. Open Gmail/Outlook and try again.");
-      return;
-    }
-
-    // Ask content script what is selected
-    const selRes = await sendWithInject(tab.id, { type: "GET_SELECTION" });
-    if (selRes.lastError) {
-      log("GET_SELECTION error:", selRes.lastError.message);
-      return;
-    }
-
-    const selectedText = (selRes.response?.selectedText || "").trim();
-    if (!selectedText) {
-      log("Nothing selected. Highlight text/token in the compose area first.");
-      return;
-    }
-
-    // Ask for passphrase (MVP). Note: prompt is available in SW in most cases,
-    // but if it is blocked in your environment, tell me and I'll add a tiny popup.
-    const passphrase = globalThis.prompt?.("QuantumMail passphrase (same for decrypt):", "");
-    if (!passphrase) {
-      log("No passphrase entered.");
-      return;
-    }
-
-    const isToken = selectedText.startsWith("qm://v1#");
-
-    if (isToken) {
-      // DECRYPT selection -> replace selection with plaintext
-      const { plaintext } = await decryptToken(selectedText, passphrase);
-      const rep = await sendWithInject(tab.id, {
-        type: "REPLACE_SELECTION",
-        text: plaintext,
-      });
-
-      if (rep.lastError) log("REPLACE_SELECTION error:", rep.lastError.message);
-      else log("Decrypted + replaced selection.");
-    } else {
-      // ENCRYPT selection -> replace selection with token
-      const token = await encryptText(selectedText, passphrase);
-      const rep = await sendWithInject(tab.id, {
-        type: "REPLACE_SELECTION",
-        text: token,
-      });
-
-      if (rep.lastError) log("REPLACE_SELECTION error:", rep.lastError.message);
-      else log("Encrypted + replaced selection.");
-    }
-  } catch (e) {
-    log("onClicked exception:", e);
-  }
-});
-
 // ---------- CRYPTO (AES-GCM + PBKDF2) ----------
-
 function b64urlToBytes(b64url) {
   const pad = "=".repeat((4 - (b64url.length % 4)) % 4);
   const b64 = (b64url + pad).replace(/-/g, "+").replace(/_/g, "/");
@@ -165,12 +76,7 @@ async function deriveKey(passphrase, saltBytes) {
   );
 
   return crypto.subtle.deriveKey(
-    {
-      name: "PBKDF2",
-      salt: saltBytes,
-      iterations: 200_000,
-      hash: "SHA-256",
-    },
+    { name: "PBKDF2", salt: saltBytes, iterations: 200_000, hash: "SHA-256" },
     baseKey,
     { name: "AES-GCM", length: 256 },
     false,
@@ -187,9 +93,8 @@ function parseToken(token) {
   const payloadBytes = b64urlToBytes(payloadPart);
   const json = new TextDecoder().decode(payloadBytes);
   const obj = JSON.parse(json);
-
   if (!obj?.salt || !obj?.iv || !obj?.ct) throw new Error("Invalid token format");
-  return obj; // {salt, iv, ct}
+  return obj;
 }
 
 async function encryptText(plaintext, passphrase) {
@@ -214,17 +119,83 @@ async function encryptText(plaintext, passphrase) {
 
 async function decryptToken(token, passphrase) {
   const { salt, iv, ct } = parseToken(token);
+  const key = await deriveKey(passphrase, b64urlToBytes(salt));
 
-  const saltBytes = b64urlToBytes(salt);
-  const ivBytes = b64urlToBytes(iv);
-  const ctBytes = b64urlToBytes(ct);
+  const ptBuf = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: b64urlToBytes(iv) },
+    key,
+    b64urlToBytes(ct)
+  );
 
-  const key = await deriveKey(passphrase, saltBytes);
-
-  const ptBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv: ivBytes }, key, ctBytes);
-  const plaintext = new TextDecoder().decode(ptBuf);
-
-  return { plaintext };
+  return new TextDecoder().decode(ptBuf);
 }
+
+// ---------- MAIN FLOW CALLED FROM POPUP ----------
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  (async () => {
+    try {
+      if (msg?.type !== "RUN_SELECTION") {
+        sendResponse({ ok: false, error: "Unknown message" });
+        return;
+      }
+
+      const mode = msg.mode; // "encrypt" | "decrypt"
+      const passphrase = String(msg.passphrase || "");
+      if (!passphrase) {
+        sendResponse({ ok: false, error: "Missing passphrase" });
+        return;
+      }
+
+      const tab = await getActiveTab();
+      if (!tab?.id) {
+        sendResponse({ ok: false, error: "No active tab. Click Gmail tab first." });
+        return;
+      }
+      if (!isSupportedTab(tab)) {
+        sendResponse({ ok: false, error: "Open Gmail or Outlook tab, then try again." });
+        return;
+      }
+
+      // get selected text
+      const sel = await sendWithInject(tab.id, { type: "GET_SELECTION" });
+      if (sel.lastError) {
+        sendResponse({ ok: false, error: sel.lastError.message });
+        return;
+      }
+
+      const selectedText = String(sel.response?.selectedText || "").trim();
+      if (!selectedText) {
+        sendResponse({ ok: false, error: "Select text inside the compose message body first." });
+        return;
+      }
+
+      let replacement = "";
+      if (mode === "encrypt") {
+        replacement = await encryptText(selectedText, passphrase);
+      } else if (mode === "decrypt") {
+        replacement = await decryptToken(selectedText, passphrase);
+      } else {
+        sendResponse({ ok: false, error: "Invalid mode" });
+        return;
+      }
+
+      const rep = await sendWithInject(tab.id, { type: "REPLACE_SELECTION", text: replacement });
+      if (rep.lastError) {
+        sendResponse({ ok: false, error: rep.lastError.message });
+        return;
+      }
+      if (!rep.response?.ok) {
+        sendResponse({ ok: false, error: rep.response?.error || "Replace failed" });
+        return;
+      }
+
+      sendResponse({ ok: true, message: mode === "encrypt" ? "Encrypted ✅" : "Decrypted ✅" });
+    } catch (e) {
+      sendResponse({ ok: false, error: String(e?.message || e) });
+    }
+  })();
+
+  return true;
+});
 
 log("Service worker loaded");
