@@ -1,13 +1,13 @@
 {
   "manifest_version": 3,
   "name": "QuantumMail (MVP)",
-  "version": "0.3.0",
-  "description": "Encrypt/decrypt selected text in Gmail/Outlook using a QuantumMail token.",
+  "version": "0.4.0",
+  "description": "Encrypt/decrypt and share as a link (Model A).",
   "action": {
     "default_title": "QuantumMail",
     "default_popup": "popup.html"
   },
-  "permissions": ["storage", "tabs", "activeTab", "scripting"],
+  "permissions": ["tabs", "activeTab", "scripting"],
   "host_permissions": [
     "https://mail.google.com/*",
     "https://outlook.office.com/*",
