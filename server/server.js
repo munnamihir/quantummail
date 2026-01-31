@@ -16,7 +16,7 @@ const store = new Map();
 // Helper: build public base URL in Codespaces using forwarded URL (if present)
 function getPublicBase(req) {
   // Codespaces sets these headers when using forwarded ports
-  const proto = req.headers["x-forwarded-proto"] || req.protocol || "http";
+  const proto = req.headers["x-forwarded-proto"] || "http";
   const host = req.headers["x-forwarded-host"] || req.headers.host;
   return `${proto}://${host}`;
 }
