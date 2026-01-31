@@ -4,31 +4,36 @@
     <meta charset="utf-8" />
     <title>QuantumMail</title>
     <style>
-      body { font-family: Arial, sans-serif; margin: 12px; width: 320px; }
+      body { font-family: Arial, sans-serif; margin: 12px; width: 340px; }
       h3 { margin: 0 0 10px; }
       label { display:block; font-size: 12px; margin-bottom: 6px; }
       input { width: 100%; padding: 8px; box-sizing: border-box; margin-bottom: 10px; }
       .row { display:flex; gap: 8px; }
       button { flex: 1; padding: 10px; cursor: pointer; }
       .status { margin-top: 10px; font-size: 12px; white-space: pre-wrap; }
-      .small { font-size: 11px; color: #555; margin-top: 8px; }
+      .small { font-size: 11px; color: #555; margin-top: 8px; line-height: 1.35; }
+      code { font-size: 11px; }
     </style>
   </head>
   <body>
     <h3>QuantumMail</h3>
 
-    <label for="pass">Passphrase (same to decrypt)</label>
+    <label for="pass">Passphrase</label>
     <input id="pass" type="password" placeholder="e.g., test123" />
 
     <div class="row">
-      <button id="encryptBtn">Encrypt Selection</button>
-      <button id="decryptBtn">Decrypt Selection</button>
+      <button id="encryptBtn">Encrypt → Link</button>
+      <button id="decryptBtn">Decrypt</button>
     </div>
 
     <div class="status" id="status"></div>
-    <div class="small">Tip: In Gmail, open Compose and highlight text inside the message body.</div>
+
+    <div class="small">
+      Encrypt inserts a link like:<br/>
+      <code>http://localhost:5173/#qm=...</code><br/>
+      Select text (or link/token) in Gmail/Outlook first.
+    </div>
 
     <script src="popup.js"></script>
   </body>
 </html>
-
