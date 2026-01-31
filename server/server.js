@@ -55,7 +55,7 @@ const portalDir = path.join(__dirname, "..", "portal");
 app.use("/portal", express.static(portalDir, { extensions: ["html"] }));
 
 // IMPORTANT: /portal/m/:id should load decrypt.html (same JS will read id from URL)
-app.get("/portal/m/:id", (req, res) => {
+app.get("/m/:id", (req, res) => {
   res.sendFile(path.join(portalDir, "decrypt.html"));
 });
 
