@@ -1,36 +1,29 @@
-// content.js
-// 1) Gmail: provide selected text
-// 2) Portal decrypt page: relay window.postMessage requests to background
+let lastSelectionText = "";
 
-function isGmail() {
-  return location.host === "mail.google.com";
-}
+document.addEventListener("selectionchange", () => {
+  try {
+    const t = (window.getSelection()?.toString() || "").trim();
+    if (t) lastSelectionText = t;
+  } catch {}
+});
 
-function isPortalDecryptPage() {
-  // Works for /m/<id> on localhost or *.app.github.dev
-  return location.pathname.startsWith("/m/");
-}
-
-// -------------------- Gmail: selection helper --------------------
 function getSelectionText() {
-  const sel = window.getSelection();
-  const text = sel ? sel.toString() : "";
-  return (text || "").trim();
+  const t = (window.getSelection()?.toString() || "").trim();
+  if (t) return t;
+  return (lastSelectionText || "").trim();
 }
 
-// Listen for background requests
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     try {
       if (msg?.type === "QM_GET_SELECTION") {
-        const text = getSelectionText();
-        sendResponse({ ok: true, text });
+        sendResponse({ ok: true, text: getSelectionText() });
         return;
       }
 
-      // Optional: insert link into active element (Gmail editor)
       if (msg?.type === "QM_INSERT_LINK") {
         const link = msg.url;
+
         const active = document.activeElement;
 
         if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT")) {
@@ -41,42 +34,28 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           return;
         }
 
-        // Contenteditable (Gmail compose)
         if (active && active.isContentEditable) {
           document.execCommand("insertText", false, link);
           sendResponse({ ok: true });
           return;
         }
 
-        sendResponse({ ok: false, error: "Could not insert link (click into Gmail editor first)" });
-        return;
-      }
+        // Gmail compose is contenteditable but sometimes activeElement isn't inside it.
+        // Fallback: try to find the compose body (best effort)
+        const editor = document.querySelector('[role="textbox"][contenteditable="true"]');
+        if (editor) {
+          editor.focus();
+          document.execCommand("insertText", false, link);
+          sendResponse({ ok: true });
+          return;
+        }
 
-      sendResponse({ ok: false, error: "Unknown message" });
+        sendResponse({ ok: false, error: "Could not insert link. Click inside the Gmail compose body and try again." });
+      }
     } catch (e) {
-      sendResponse({ ok: false, error: String(e?.message || e) });
+      sendResponse({ ok: false, error: e?.message || String(e) });
     }
   })();
 
   return true;
 });
-
-// -------------------- Portal decrypt relay --------------------
-if (isPortalDecryptPage()) {
-  window.addEventListener("message", (event) => {
-    const data = event.data || {};
-    if (data?.source !== "quantummail-portal") return;
-    if (data.type !== "QM_DECRYPT_REQUEST") return;
-
-    chrome.runtime.sendMessage(
-      { type: "QM_DECRYPT_LINK", msgId: data.msgId, origin: data.origin },
-      (resp) => {
-        const out = resp?.ok
-          ? { source: "quantummail-extension", type: "QM_DECRYPT_RESULT", ok: true, plaintext: resp.plaintext }
-          : { source: "quantummail-extension", type: "QM_DECRYPT_RESULT", ok: false, error: resp?.error || "Decrypt failed" };
-
-        window.postMessage(out, "*");
-      }
-    );
-  });
-}
