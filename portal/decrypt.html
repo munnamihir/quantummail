@@ -6,28 +6,42 @@
   <title>QuantumMail Decrypt</title>
   <link rel="stylesheet" href="/portal/styles.css" />
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 18px; background:#fff; color:#111; }
-    .card { max-width: 900px; margin: 0 auto; border: 1px solid #ddd; border-radius: 12px; padding: 14px; }
-    #plaintext { color:#111; background:#f6f6f6; border:1px solid #ddd; padding:12px; border-radius:10px; white-space:pre-wrap; word-break:break-word; }
-    .muted { color:#555; }
-    .err { color:#b00020; }
-    button { padding: 10px 14px; border-radius: 8px; border: 1px solid #333; cursor: pointer; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#fff; color:#111; padding: 18px; }
+    .wrap { max-width: 900px; margin: 0 auto; }
+    .card { border:1px solid #ddd; border-radius: 12px; padding: 14px; background:#fff; }
+    button { padding: 10px 14px; border-radius: 10px; border: 1px solid #111; background:#fff; cursor:pointer; }
+    textarea { width: 100%; min-height: 220px; padding: 12px; border-radius: 12px; border:1px solid #ccc; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono"; color:#111; background:#fff; }
+    .muted { color:#666; font-size: 13px; }
+    .err { color:#b00020; white-space: pre-wrap; }
+    .ok { color:#0a7a2f; white-space: pre-wrap; }
+    code { background:#f2f2f2; padding:2px 6px; border-radius: 6px; }
   </style>
 </head>
 <body>
-  <div class="card">
+  <div class="wrap">
     <h2>Decrypt Secure Message</h2>
-    <div class="muted">This link requires the QuantumMail extension installed.</div>
-
-    <div id="status" class="muted" style="margin-top:8px;">Ready.</div>
-    <div id="err" class="err"></div>
-
-    <div style="margin-top:10px;">
-      <button id="btnDecrypt">Decrypt using Extension</button>
+    <div class="muted">
+      This link contains encrypted content. You must be logged in in the <b>QuantumMail extension</b> to decrypt.
     </div>
 
-    <h3 style="margin-top:14px;">Plaintext</h3>
-    <div id="plaintext">(not decrypted)</div>
+    <div class="card" style="margin-top:12px;">
+      <div class="muted">Message ID: <code id="msgId">-</code></div>
+
+      <div style="margin-top:12px;">
+        <button id="btnDecrypt">Decrypt using Extension</button>
+      </div>
+
+      <div id="ok" class="ok" style="margin-top:10px;"></div>
+      <div id="err" class="err" style="margin-top:10px;"></div>
+
+      <div style="margin-top:12px;">
+        <textarea id="out" placeholder="Decrypted plaintext will appear here..." readonly></textarea>
+      </div>
+
+      <div class="muted" style="margin-top:10px;">
+        If decryption fails, open the extension and login as the intended recipient, then try again.
+      </div>
+    </div>
   </div>
 
   <script type="module" src="/portal/decrypt.js"></script>
