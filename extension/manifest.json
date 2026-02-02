@@ -1,22 +1,38 @@
 {
   "manifest_version": 3,
-  "name": "QuantumMail (MVP)",
-  "version": "0.4.0",
-  "description": "Encrypt/decrypt and share as a link (Model A).",
+  "name": "QuantumMail Enterprise (MVP)",
+  "version": "0.2.0",
+  "description": "Enterprise QuantumMail: org-managed AES keys with rotation (Model B).",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "clipboardRead",
+    "clipboardWrite"
+  ],
+  "host_permissions": [
+    "http://localhost:5173/*",
+    "https://*.app.github.dev/*"
+  ],
   "action": {
     "default_title": "QuantumMail",
     "default_popup": "popup.html"
   },
-  "permissions": ["tabs", "activeTab", "scripting"],
-  "host_permissions": [
-    "https://mail.google.com/*",
-    "https://outlook.office.com/*",
-    "https://outlook.live.com/*"
-  ],
   "background": {
     "service_worker": "background.js",
     "type": "module"
   },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://mail.google.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",

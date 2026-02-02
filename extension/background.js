@@ -1,60 +1,47 @@
-// background.js (MV3 service worker, type=module)
-// QuantumMail MVP: encrypt selection -> share link (Model A)
-// decrypt selection -> plaintext (works for qm:// token or the share link)
+// QuantumMail Enterprise - background (MV3 service worker)
+// - Stores settings + JWT
+// - Provides API helpers + AES-GCM crypto helpers (WebCrypto)
+// - Content script calls these via chrome.runtime.sendMessage
 
-const EXT = "QuantumMail";
-const log = (...args) => console.log(`[${EXT} BG]`, ...args);
+const DEFAULTS = {
+  apiBase: "http://localhost:5173",
+  orgId: "org_demo"
+};
 
-// CHANGE THIS later to your real domain, e.g. https://quantummail.app
-const SHARE_BASE = "http://localhost:5173";
-
-// Gmail/Outlook support
-const SUPPORTED_HOSTS = new Set([
-  "mail.google.com",
-  "outlook.office.com",
-  "outlook.live.com",
-]);
-
-function parseUrl(url) {
-  try { return new URL(url); } catch { return null; }
+function normalizeBase(url) {
+  return String(url || "").replace(/\/+$/, "");
 }
 
-function isSupportedTab(tab) {
-  const u = parseUrl(tab?.url || "");
-  return !!u && u.protocol === "https:" && SUPPORTED_HOSTS.has(u.hostname);
+function storageGet(keysObj) {
+  return new Promise((resolve) => chrome.storage.sync.get(keysObj, (v) => resolve(v || keysObj)));
+}
+function storageSet(patch) {
+  return new Promise((resolve, reject) =>
+    chrome.storage.sync.set(patch, () => {
+      const err = chrome.runtime.lastError;
+      if (err) reject(err);
+      else resolve();
+    })
+  );
 }
 
-async function getActiveTab() {
-  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  return tabs?.[0] || null;
+async function getSettings() {
+  const v = await storageGet(DEFAULTS);
+  return { ...DEFAULTS, ...v, apiBase: normalizeBase(v.apiBase) };
 }
 
-async function ensureContentScript(tabId) {
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    files: ["content.js"],
-  });
+async function getAuthToken() {
+  const { token } = await storageGet({ token: null });
+  return token || null;
 }
 
-function sendToTab(tabId, message) {
-  return new Promise((resolve) => {
-    chrome.tabs.sendMessage(tabId, message, (response) => {
-      resolve({ response, lastError: chrome.runtime.lastError });
-    });
-  });
+// ---------- Base64url helpers ----------
+function bytesToB64url(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  const b64 = btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return b64;
 }
-
-async function sendWithInject(tabId, message) {
-  let res = await sendToTab(tabId, message);
-  if (res?.lastError?.message?.includes("Receiving end does not exist")) {
-    log("Receiver missing; injecting content.js then retrying...");
-    await ensureContentScript(tabId);
-    res = await sendToTab(tabId, message);
-  }
-  return res;
-}
-
-// ---------- CRYPTO (AES-GCM + PBKDF2) ----------
 function b64urlToBytes(b64url) {
   const pad = "=".repeat((4 - (b64url.length % 4)) % 4);
   const b64 = (b64url + pad).replace(/-/g, "+").replace(/_/g, "/");
@@ -64,169 +51,195 @@ function b64urlToBytes(b64url) {
   return bytes;
 }
 
-function bytesToB64url(bytes) {
-  let bin = "";
-  bytes.forEach((b) => (bin += String.fromCharCode(b)));
-  const b64 = btoa(bin);
-  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+// ---------- Crypto ----------
+async function importAesKeyFromB64url(keyB64url) {
+  const raw = b64urlToBytes(keyB64url);
+  return crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
 }
 
-async function deriveKey(passphrase, saltBytes) {
+async function aesGcmEncrypt(cryptoKey, plaintext, aadStr = "") {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
   const enc = new TextEncoder();
-  const baseKey = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(passphrase),
-    "PBKDF2",
-    false,
-    ["deriveKey"]
+  const pt = enc.encode(String(plaintext));
+
+  const aad = aadStr ? enc.encode(aadStr) : null;
+
+  const ctBuf = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv, additionalData: aad || undefined },
+    cryptoKey,
+    pt
   );
 
-  return crypto.subtle.deriveKey(
-    { name: "PBKDF2", salt: saltBytes, iterations: 200_000, hash: "SHA-256" },
-    baseKey,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt", "decrypt"]
-  );
-}
-
-function makePayloadObject({ saltBytes, ivBytes, ctBytes }) {
   return {
-    salt: bytesToB64url(saltBytes),
-    iv: bytesToB64url(ivBytes),
-    ct: bytesToB64url(ctBytes),
+    iv: bytesToB64url(iv),
+    ciphertext: bytesToB64url(new Uint8Array(ctBuf))
   };
 }
 
-function payloadObjToB64url(payloadObj) {
-  const payloadJson = JSON.stringify(payloadObj);
-  return bytesToB64url(new TextEncoder().encode(payloadJson));
-}
-
-// Accepts either:
-// - qm://v1#<payload>
-// - http(s)://.../#qm=<payload>
-// - just <payload>
-function extractPayloadB64url(input) {
-  const s = String(input || "").trim();
-  if (!s) throw new Error("Empty input");
-
-  // qm:// token
-  if (s.startsWith("qm://v1#")) {
-    const payload = s.slice("qm://v1#".length).trim();
-    if (!payload) throw new Error("Missing qm payload");
-    return payload;
-  }
-
-  // share link
-  if (s.startsWith("http://") || s.startsWith("https://")) {
-    const u = new URL(s);
-    // use fragment, not query
-    const hash = (u.hash || "").replace(/^#/, "");
-    const params = new URLSearchParams(hash);
-    const payload = params.get("qm");
-    if (!payload) throw new Error("No #qm= payload in link");
-    return payload;
-  }
-
-  // maybe the payload itself
-  return s;
-}
-
-async function encryptToPayloadB64url(plaintext, passphrase) {
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const key = await deriveKey(passphrase, salt);
-
-  const ptBytes = new TextEncoder().encode(String(plaintext));
-  const ctBuf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, ptBytes);
-  const ct = new Uint8Array(ctBuf);
-
-  const payloadObj = makePayloadObject({ saltBytes: salt, ivBytes: iv, ctBytes: ct });
-  return payloadObjToB64url(payloadObj);
-}
-
-function payloadB64urlToObj(payloadB64url) {
-  const payloadBytes = b64urlToBytes(payloadB64url);
-  const json = new TextDecoder().decode(payloadBytes);
-  const obj = JSON.parse(json);
-  if (!obj?.salt || !obj?.iv || !obj?.ct) throw new Error("Invalid payload");
-  return obj;
-}
-
-async function decryptFromPayloadB64url(payloadB64url, passphrase) {
-  const obj = payloadB64urlToObj(payloadB64url);
-  const key = await deriveKey(passphrase, b64urlToBytes(obj.salt));
+async function aesGcmDecrypt(cryptoKey, ivB64url, ciphertextB64url, aadStr = "") {
+  const iv = b64urlToBytes(ivB64url);
+  const ct = b64urlToBytes(ciphertextB64url);
+  const enc = new TextEncoder();
+  const aad = aadStr ? enc.encode(aadStr) : null;
 
   const ptBuf = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: b64urlToBytes(obj.iv) },
-    key,
-    b64urlToBytes(obj.ct)
+    { name: "AES-GCM", iv, additionalData: aad || undefined },
+    cryptoKey,
+    ct
   );
+
   return new TextDecoder().decode(ptBuf);
 }
 
-function buildShareLink(payloadB64url) {
-  // Payload stays in fragment so server never receives it
-  return `${SHARE_BASE}/#qm=${payloadB64url}`;
+// ---------- API ----------
+async function apiFetch(path, { method = "GET", jsonBody = null } = {}) {
+  const { apiBase } = await getSettings();
+  const token = await getAuthToken();
+
+  const headers = { "Accept": "application/json" };
+  if (jsonBody) headers["Content-Type"] = "application/json";
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetch(`${apiBase}${path}`, {
+    method,
+    headers,
+    body: jsonBody ? JSON.stringify(jsonBody) : undefined
+  });
+
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+
+  if (!res.ok) {
+    const msg = data?.error || `HTTP ${res.status}`;
+    throw new Error(msg);
+  }
+  return data;
 }
 
-// ---------- MAIN FLOW CALLED FROM POPUP ----------
+// cache CryptoKey by version in SW memory
+const keyCache = new Map(); // version -> CryptoKey
+
+async function getActiveKeyVersion() {
+  const data = await apiFetch("/keys/active");
+  return data.version;
+}
+async function getKeyMaterial(version) {
+  if (keyCache.has(version)) return keyCache.get(version);
+  const data = await apiFetch(`/keys/${version}/material`);
+  const key = await importAesKeyFromB64url(data.keyB64);
+  keyCache.set(version, key);
+  return key;
+}
+
+// ---------- Message flow (Model B) ----------
+async function encryptAndStoreMessage(plaintext, aadStr = "") {
+  const version = await getActiveKeyVersion();
+  const key = await getKeyMaterial(version);
+
+  const enc = await aesGcmEncrypt(key, plaintext, aadStr);
+  const saved = await apiFetch("/api/messages", {
+    method: "POST",
+    jsonBody: {
+      keyVersion: version,
+      iv: enc.iv,
+      ciphertext: enc.ciphertext,
+      aad: aadStr || null
+    }
+  });
+
+  return { url: saved.url, id: saved.id, keyVersion: version };
+}
+
+function parseMessageIdFromLink(link) {
+  try {
+    const u = new URL(link);
+    // accept /m/<id> or /portal/m/<id>
+    const parts = u.pathname.split("/").filter(Boolean);
+    const mIndex = parts.indexOf("m");
+    if (mIndex >= 0 && parts[mIndex + 1]) return parts[mIndex + 1];
+  } catch {}
+  // fallback: raw id
+  const m = String(link || "").match(/\/m\/([A-Za-z0-9_-]{6,})/);
+  return m ? m[1] : null;
+}
+
+async function fetchAndDecryptMessageById(id) {
+  const msg = await apiFetch(`/api/messages/${id}`);
+  const key = await getKeyMaterial(msg.keyVersion);
+  const pt = await aesGcmDecrypt(key, msg.iv, msg.ciphertext, msg.aad || "");
+  return { plaintext: pt, keyVersion: msg.keyVersion, createdAt: msg.createdAt };
+}
+
+// ---------- Auth ----------
+async function login({ orgId, username, password }) {
+  const { apiBase } = await getSettings();
+  const res = await fetch(`${apiBase}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Accept": "application/json" },
+    body: JSON.stringify({ orgId, username, password })
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+
+  await storageSet({ token: data.token, orgId });
+  // clear cache on new login
+  keyCache.clear();
+  return data.user;
+}
+
+async function logout() {
+  await storageSet({ token: null });
+  keyCache.clear();
+}
+
+// ---------- Message router ----------
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     try {
-      if (msg?.type !== "RUN_SELECTION") {
-        sendResponse({ ok: false, error: "Unknown message" });
+      if (msg?.type === "qm_get_settings") {
+        const s = await getSettings();
+        const token = await getAuthToken();
+        sendResponse({ ok: true, settings: s, isAuthed: !!token });
+        return;
+      }
+      if (msg?.type === "qm_set_settings") {
+        const patch = {};
+        if (typeof msg.apiBase === "string") patch.apiBase = normalizeBase(msg.apiBase);
+        if (typeof msg.orgId === "string") patch.orgId = msg.orgId;
+        await storageSet(patch);
+        sendResponse({ ok: true });
+        return;
+      }
+      if (msg?.type === "qm_login") {
+        const user = await login(msg);
+        sendResponse({ ok: true, user });
+        return;
+      }
+      if (msg?.type === "qm_logout") {
+        await logout();
+        sendResponse({ ok: true });
+        return;
+      }
+      if (msg?.type === "qm_encrypt_store") {
+        const result = await encryptAndStoreMessage(msg.plaintext || "", msg.aad || "");
+        sendResponse({ ok: true, result });
+        return;
+      }
+      if (msg?.type === "qm_decrypt_link") {
+        const id = parseMessageIdFromLink(msg.link || "");
+        if (!id) throw new Error("Could not parse message id from link");
+        const result = await fetchAndDecryptMessageById(id);
+        sendResponse({ ok: true, result });
         return;
       }
 
-      const mode = msg.mode; // "encrypt" | "decrypt"
-      const passphrase = String(msg.passphrase || "");
-      if (!passphrase) return sendResponse({ ok: false, error: "Missing passphrase" });
-
-      const tab = await getActiveTab();
-      if (!tab?.id) return sendResponse({ ok: false, error: "No active tab. Click Gmail tab first." });
-      if (!isSupportedTab(tab)) return sendResponse({ ok: false, error: "Open Gmail/Outlook, then try again." });
-
-      // get selected text
-      const sel = await sendWithInject(tab.id, { type: "GET_SELECTION" });
-      if (sel.lastError) return sendResponse({ ok: false, error: sel.lastError.message });
-
-      const selectedText = String(sel.response?.selectedText || "").trim();
-      if (!selectedText) return sendResponse({ ok: false, error: "Select text/link/token in the email first." });
-
-      let replacement = "";
-
-      if (mode === "encrypt") {
-        // Encrypt plaintext -> payload -> share link
-        const payloadB64url = await encryptToPayloadB64url(selectedText, passphrase);
-        replacement = buildShareLink(payloadB64url);
-      } else if (mode === "decrypt") {
-        // Decrypt selected token/link -> plaintext
-        const payloadB64url = extractPayloadB64url(selectedText);
-        replacement = await decryptFromPayloadB64url(payloadB64url, passphrase);
-      } else {
-        return sendResponse({ ok: false, error: "Invalid mode" });
-      }
-
-      // Replace selection in compose OR read view (content.js handles both)
-      const rep = await sendWithInject(tab.id, { type: "REPLACE_SELECTION", text: replacement });
-      if (rep.lastError) return sendResponse({ ok: false, error: rep.lastError.message });
-      if (!rep.response?.ok) return sendResponse({ ok: false, error: rep.response?.error || "Replace failed" });
-
-      sendResponse({
-        ok: true,
-        message:
-          mode === "encrypt"
-            ? "Encrypted → link inserted ✅ (send it)"
-            : "Decrypted ✅"
-      });
+      throw new Error("Unknown request");
     } catch (e) {
       sendResponse({ ok: false, error: String(e?.message || e) });
     }
   })();
 
-  return true;
+  return true; // keep channel open for async
 });
-
-log("Service worker loaded");
