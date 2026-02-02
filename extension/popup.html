@@ -3,42 +3,60 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>QuantumMail</title>
   <style>
-    body { font-family: system-ui, Arial; width: 320px; padding: 12px; }
-    input { width: 100%; box-sizing: border-box; padding: 8px; margin: 6px 0; border: 1px solid #bbb; border-radius: 8px; }
-    button { width: 100%; padding: 10px; margin-top: 8px; border: 1px solid #333; border-radius: 10px; cursor: pointer; }
-    .muted { color: #666; font-size: 12px; }
-    .err { color: #b00020; font-size: 12px; white-space: pre-wrap; }
-    .ok { color: #0a7a2f; font-size: 12px; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 12px; width: 360px; }
+    input, button, textarea { width: 100%; padding: 10px; margin: 6px 0; border-radius: 10px; border: 1px solid #ccc; }
+    button { cursor: pointer; border-color:#111; background:#fff; }
+    .row { display:flex; gap:8px; }
+    .row > * { flex:1; }
+    .muted { color:#666; font-size: 12px; }
+    .ok { color:#0a7a2f; font-size: 12px; }
+    .err { color:#b00020; font-size: 12px; white-space: pre-wrap; }
+    label { font-size: 12px; color:#222; margin-top: 8px; display:block; }
+    .pill { display:inline-block; padding:2px 8px; border:1px solid #ddd; border-radius:999px; font-size: 12px; }
   </style>
 </head>
 <body>
-  <h3>QuantumMail</h3>
+  <h3 style="margin:0 0 6px 0;">QuantumMail</h3>
+  <div class="muted">Envelope encryption (AES-GCM per message, DEK wrapped to recipients)</div>
 
-  <div class="muted">Server base (Codespace/localhost)</div>
-  <input id="serverBase" placeholder="https://...app.github.dev" />
+  <label>Server Base</label>
+  <input id="serverBase" placeholder="https://...-5173.app.github.dev" />
 
-  <div class="muted">Org ID</div>
-  <input id="orgId" placeholder="org_demo" />
+  <div class="row">
+    <div>
+      <label>Org</label>
+      <input id="orgId" placeholder="org_demo" />
+    </div>
+    <div>
+      <label>User</label>
+      <input id="username" placeholder="alice" />
+    </div>
+  </div>
 
-  <div class="muted">Username</div>
-  <input id="username" placeholder="alice" />
-
-  <div class="muted">Password</div>
+  <label>Password</label>
   <input id="password" type="password" placeholder="••••••••" />
 
-  <button id="btnLogin">Login</button>
+  <div class="row">
+    <button id="btnLogin">Login</button>
+    <button id="btnLogout">Logout</button>
+  </div>
 
-  <div style="height:10px;"></div>
-
-  <div class="muted">Recipients (comma usernames). If empty → encrypt for yourself only.</div>
-  <input id="recipients" placeholder="bob,charlie" />
-
-  <button id="btnEncryptSelection">Encrypt Selected Text (Gmail)</button>
-
-  <div id="msg" class="muted"></div>
-  <div id="err" class="err"></div>
+  <div class="muted">Status: <span id="status" class="pill">Signed out</span></div>
   <div id="ok" class="ok"></div>
+  <div id="err" class="err"></div>
+
+  <hr />
+
+  <label>Recipients (comma-separated usernames)</label>
+  <input id="recipients" placeholder="mihir,bob" />
+
+  <button id="btnEncrypt">Encrypt selected text in Gmail</button>
+
+  <div class="muted" style="margin-top:8px;">
+    Tip: each recipient must login once to register a public key.
+  </div>
 
   <script type="module" src="popup.js"></script>
 </body>
