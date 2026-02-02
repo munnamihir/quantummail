@@ -1,13 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "QuantumMail (Envelope Encryption)",
-  "version": "0.2.0",
-  "description": "Encrypt selected text into a secure link; decrypt via extension only.",
+  "name": "QuantumMail (Envelope Encryption MVP)",
+  "version": "0.3.0",
+  "description": "Encrypt selected email text into a secure link. Envelope encryption with per-user wrapped keys.",
   "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": [
-    "http://localhost:5173/*",
+    "https://mail.google.com/*",
     "https://*.app.github.dev/*",
-    "https://mail.google.com/*"
+    "http://localhost:5173/*"
   ],
   "action": {
     "default_title": "QuantumMail",
@@ -19,12 +19,9 @@
   },
   "content_scripts": [
     {
-      "matches": [
-        "https://mail.google.com/*",
-        "http://localhost:5173/*",
-        "https://*.app.github.dev/*"
-      ],
-      "js": ["content.js"]
+      "matches": ["https://mail.google.com/*", "https://*.app.github.dev/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
     }
   ]
 }
