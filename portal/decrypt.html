@@ -2,63 +2,32 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>QuantumMail Decrypt</title>
   <link rel="stylesheet" href="/portal/styles.css" />
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 18px; }
-    .card { max-width: 820px; margin: 0 auto; border: 1px solid #ddd; border-radius: 12px; padding: 16px; }
-    .row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
-    input { padding: 10px; border-radius: 8px; border: 1px solid #bbb; flex: 1; min-width: 220px; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 18px; background:#fff; color:#111; }
+    .card { max-width: 900px; margin: 0 auto; border: 1px solid #ddd; border-radius: 12px; padding: 14px; }
+    #plaintext { color:#111; background:#f6f6f6; border:1px solid #ddd; padding:12px; border-radius:10px; white-space:pre-wrap; word-break:break-word; }
+    .muted { color:#555; }
+    .err { color:#b00020; }
     button { padding: 10px 14px; border-radius: 8px; border: 1px solid #333; cursor: pointer; }
-    .muted { color: #666; font-size: 13px; }
-    pre { white-space: pre-wrap; word-break: break-word; background: #f6f6f6; padding: 12px; border-radius: 10px; }
-    .error { color: #b00020; margin-top: 10px; }
-    .ok { color: #0a7a2f; }
-    #plaintext {
-  color: #111 !important;
-  background: #f6f6f6 !important;
-  border: 1px solid #ddd;
-  padding: 12px;
-  border-radius: 10px;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
   </style>
 </head>
 <body>
   <div class="card">
-    <h2>Decrypt QuantumMail Message</h2>
-    <div class="muted">This link is protected. Sign in with your company credentials to decrypt.</div>
+    <h2>Decrypt Secure Message</h2>
+    <div class="muted">This link requires the QuantumMail extension installed.</div>
 
-    <div id="status" class="muted" style="margin-top:10px;">Loading…</div>
+    <div id="status" class="muted" style="margin-top:8px;">Ready.</div>
+    <div id="err" class="err"></div>
 
-    <div id="loginBox" style="margin-top:14px; display:none;">
-      <div class="row">
-        <input id="orgId" placeholder="Org ID (e.g., org_demo)" />
-      </div>
-      <div class="row">
-        <input id="username" placeholder="Username" autocomplete="username" />
-        <input id="password" placeholder="Password" type="password" autocomplete="current-password" />
-      </div>
-      <div class="row">
-        <button id="btnLogin">Sign in</button>
-        <button id="btnClear" type="button">Clear saved session</button>
-      </div>
-      <div class="muted">Tip: Use the same user you used in the extension (ex: alice / alice123).</div>
+    <div style="margin-top:10px;">
+      <button id="btnDecrypt">Decrypt using Extension</button>
     </div>
 
-    <div id="resultBox" style="margin-top:14px; display:none;">
-      <div class="row">
-        <button id="btnDecrypt">Decrypt</button>
-        <button id="btnLogout" type="button">Sign out</button>
-      </div>
-      <div id="meta" class="muted"></div>
-      <h3 style="margin-top:14px;">Plaintext</h3>
-      <pre id="plaintext">(not decrypted yet)</pre>
-      <div id="err" class="error"></div>
-    </div>
+    <h3 style="margin-top:14px;">Plaintext</h3>
+    <div id="plaintext">(not decrypted)</div>
   </div>
 
   <script type="module" src="/portal/decrypt.js"></script>
