@@ -5,28 +5,47 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import path from "path";
 import { fileURLToPath } from "url";
+import { loadDbOrDefault, scheduleSaveDb, dataFilePath } from "./persist.js";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
+// ========================
+// CONFIG
+// ========================
 const PORT = process.env.PORT || 5173;
 
-// Secrets (set in Codespaces env later)
+// Put these in Codespaces Secrets / environment in real usage
 const JWT_SECRET = process.env.JWT_SECRET || "dev_jwt_secret_change_me";
 const SERVER_WRAP_SECRET =
   process.env.SERVER_WRAP_SECRET || "dev_wrap_secret_change_me_32bytes_min";
 
+// Derive 32 bytes AES-256 wrap key from secret string
 function getWrapKey() {
   return crypto.createHash("sha256").update(String(SERVER_WRAP_SECRET)).digest();
 }
 
-// ---------- DB (in-memory MVP) ----------
-const db = {
-  orgs: new Map(),      // orgId -> { orgId, name }
-  users: new Map(),     // userId -> { userId, orgId, username, passwordHash, role, status }
-  keys: new Map(),      // orgId -> [{ version, status, wrappedKey, createdAt, activatedAt, retiredAt }]
-  messages: new Map(),  // msgId -> { msgId, orgId, createdBy, keyVersion, iv, ciphertext, aad, createdAt }
+// Helper: build public base URL in Codespaces forwarded ports
+function getPublicBase(req) {
+  const proto = req.headers["x-forwarded-proto"] || "http";
+  const host = req.headers["x-forwarded-host"] || req.headers.host;
+  return `${proto}://${host}`;
+}
+
+// ========================
+// In-memory MVP DB
+// ========================
+const defaultDb = {
+  orgs: new Map(),
+  users: new Map(),
+  keys: new Map(),
+  messages: new Map(),
+  audit: []
 };
+
+const db = loadDbOrDefault(defaultDb);
+console.log("📦 Persistence file:", dataFilePath());
+
 
 function seed() {
   const orgId = "org_demo";
@@ -37,18 +56,28 @@ function seed() {
 }
 seed();
 
-function getPublicBase(req) {
-  const proto = req.headers["x-forwarded-proto"] || "http";
-  const host = req.headers["x-forwarded-host"] || req.headers.host;
-  return `${proto}://${host}`;
+// ========================
+// Auth middleware
+// ========================
+function audit(orgId, userId, action, details = {}) {
+  db.audit.push({
+    id: nanoid(10),
+    orgId,
+    userId,
+    action,
+    ...details,
+    at: new Date().toISOString()
+  });
 }
 
 function requireAuth(req, res, next) {
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : null;
   if (!token) return res.status(401).json({ error: "Missing Bearer token" });
+
   try {
-    req.user = jwt.verify(token, JWT_SECRET);
+    const payload = jwt.verify(token, JWT_SECRET);
+    req.user = payload; // { userId, orgId, role, username }
     return next();
   } catch {
     return res.status(401).json({ error: "Invalid token" });
@@ -57,10 +86,12 @@ function requireAuth(req, res, next) {
 
 function requireAdmin(req, res, next) {
   if (req.user?.role !== "Admin") return res.status(403).json({ error: "Admin only" });
-  next();
+  return next();
 }
 
-// ---------- Key wrapping ----------
+// ========================
+// Key wrapping: encrypt AES keys at rest using server secret
+// ========================
 function wrapRawKey(rawKeyBytes) {
   const wrapKey = getWrapKey();
   const iv = crypto.randomBytes(12);
@@ -79,12 +110,18 @@ function unwrapRawKey(wrapped) {
   const iv = Buffer.from(wrapped.iv, "base64url");
   const ct = Buffer.from(wrapped.ct, "base64url");
   const tag = Buffer.from(wrapped.tag, "base64url");
+
   const decipher = crypto.createDecipheriv("aes-256-gcm", wrapKey, iv);
   decipher.setAuthTag(tag);
-  return Buffer.concat([decipher.update(ct), decipher.final()]);
+  return Buffer.concat([decipher.update(ct), decipher.final()]); // Buffer(32)
 }
 
-// ---------- Auth ----------
+// ========================
+// Auth endpoints
+// ========================
+
+// Dev helper: create a demo admin quickly.
+// Remove/disable this in production.
 app.post("/dev/seed-admin", async (req, res) => {
   const { orgId = "org_demo", username = "admin", password = "admin123" } = req.body || {};
 
@@ -110,7 +147,9 @@ app.post("/dev/seed-admin", async (req, res) => {
     status: "Active"
   });
 
-  res.json({ ok: true, orgId, username, password });
+  scheduleSaveDb(db);
+
+  return res.json({ ok: true, orgId, username, password });
 });
 
 app.post("/auth/login", async (req, res) => {
@@ -133,44 +172,71 @@ app.post("/auth/login", async (req, res) => {
     { expiresIn: "8h" }
   );
 
-  res.json({ token, user: { userId: user.userId, orgId: user.orgId, role: user.role, username: user.username } });
+  audit(user.orgId, user.userId, "login");
+  return res.json({
+    token,
+    user: { userId: user.userId, orgId: user.orgId, role: user.role, username: user.username }
+  });
 });
 
-// Admin creates users
+// Admin creates team users
 app.post("/admin/users", requireAuth, requireAdmin, async (req, res) => {
   const { username, password, role = "Member" } = req.body || {};
   if (!username || !password) return res.status(400).json({ error: "username/password required" });
-  if (!["Admin", "Member"].includes(role)) return res.status(400).json({ error: "role must be Admin|Member" });
+  if (!["Admin", "Member"].includes(role)) {
+    return res.status(400).json({ error: "role must be Admin|Member" });
+  }
 
   const orgId = req.user.orgId;
-  const exists = Array.from(db.users.values()).some((u) => u.orgId === orgId && u.username === username);
+
+  const exists = Array.from(db.users.values()).some(
+    (u) => u.orgId === orgId && u.username === username
+  );
   if (exists) return res.status(409).json({ error: "username already exists" });
 
   const userId = nanoid(10);
   const passwordHash = await bcrypt.hash(String(password), 12);
-  db.users.set(userId, { userId, orgId, username, passwordHash, role, status: "Active" });
 
-  res.json({ ok: true, userId, username, role });
+  db.users.set(userId, {
+    userId,
+    orgId,
+    username,
+    passwordHash,
+    role,
+    status: "Active"
+  });
+  
+  scheduleSaveDb(db);
+  audit(orgId, req.user.userId, "create_user", { targetUserId: userId, username, role });
+  return res.json({ ok: true, userId, username, role });
 });
 
-// ---------- Keys ----------
+// ========================
+// Managed AES Keys with Rotation
+// ========================
 function getOrgKeys(orgId) {
   if (!db.keys.has(orgId)) db.keys.set(orgId, []);
   return db.keys.get(orgId);
 }
+
 function getActiveKeyRecord(orgId) {
-  return getOrgKeys(orgId).find((k) => k.status === "Active") || null;
+  const keys = getOrgKeys(orgId);
+  return keys.find((k) => k.status === "Active") || null;
 }
 
+// Admin: rotate (or create first) key
 app.post("/admin/keys/rotate", requireAuth, requireAdmin, (req, res) => {
   const orgId = req.user.orgId;
   const keys = getOrgKeys(orgId);
+
   const active = getActiveKeyRecord(orgId);
   const nextVersion = active ? active.version + 1 : 1;
 
+  // New raw AES-256 key
   const rawKey = crypto.randomBytes(32);
   const wrapped = wrapRawKey(rawKey);
 
+  // Mark previous active as Retiring
   if (active) active.status = "Retiring";
 
   const now = new Date().toISOString();
@@ -183,27 +249,59 @@ app.post("/admin/keys/rotate", requireAuth, requireAdmin, (req, res) => {
     retiredAt: null
   });
 
-  res.json({ ok: true, activeVersion: nextVersion });
+  scheduleSaveDb(db);
+  audit(orgId, req.user.userId, "rotate_key", { keyVersion: nextVersion });
+  return res.json({ ok: true, activeVersion: nextVersion });
 });
 
+// Admin: retire old key version (prevents decrypt)
+app.post("/admin/keys/:version/retire", requireAuth, requireAdmin, (req, res) => {
+  const orgId = req.user.orgId;
+  const version = Number(req.params.version);
+  const keys = getOrgKeys(orgId);
+  const key = keys.find((k) => k.version === version);
+  if (!key) return res.status(404).json({ error: "Key not found" });
+
+  const active = getActiveKeyRecord(orgId);
+  if (active && active.version === version) {
+    return res.status(400).json({ error: "Cannot retire active key. Rotate first." });
+  }
+
+  key.status = "Retired";
+  key.retiredAt = new Date().toISOString();
+
+  scheduleSaveDb(db);
+  audit(orgId, req.user.userId, "retire_key", { keyVersion: version });
+  return res.json({ ok: true });
+});
+
+// Member: get active key version
 app.get("/keys/active", requireAuth, (req, res) => {
   const active = getActiveKeyRecord(req.user.orgId);
   if (!active) return res.status(404).json({ error: "No active key. Admin must rotate/create one." });
-  res.json({ version: active.version });
+  return res.json({ version: active.version });
 });
 
+// Member: get key material for a version (MVP returns raw key bytes base64url)
 app.get("/keys/:version/material", requireAuth, (req, res) => {
   const orgId = req.user.orgId;
   const version = Number(req.params.version);
-  const key = getOrgKeys(orgId).find((k) => k.version === version);
+
+  const keys = getOrgKeys(orgId);
+  const key = keys.find((k) => k.version === version);
+
   if (!key) return res.status(404).json({ error: "Key not found" });
   if (key.status === "Retired") return res.status(410).json({ error: "Key retired" });
 
   const raw = unwrapRawKey(key.wrappedKey);
-  res.json({ version, alg: "AES-GCM-256", keyB64: raw.toString("base64url") });
+
+  audit(orgId, req.user.userId, "get_key_material", { keyVersion: version });
+  return res.json({ version, alg: "AES-GCM-256", keyB64: raw.toString("base64url") });
 });
 
-// ---------- Messages (Model B) ----------
+// ========================
+// Messages (Model B)
+// ========================
 app.post("/api/messages", requireAuth, (req, res) => {
   const { keyVersion, iv, ciphertext, aad } = req.body || {};
   if (!keyVersion || !iv || !ciphertext) {
@@ -224,9 +322,12 @@ app.post("/api/messages", requireAuth, (req, res) => {
     createdAt
   });
 
+  scheduleSaveDb(db);
+  audit(req.user.orgId, req.user.userId, "encrypt", { messageId: id, keyVersion: Number(keyVersion) });
+
   const base = getPublicBase(req);
   const url = `${base}/m/${id}`;
-  res.json({ id, url });
+  return res.json({ id, url });
 });
 
 app.get("/api/messages/:id", requireAuth, (req, res) => {
@@ -234,7 +335,9 @@ app.get("/api/messages/:id", requireAuth, (req, res) => {
   if (!msg) return res.status(404).json({ error: "Not found" });
   if (msg.orgId !== req.user.orgId) return res.status(403).json({ error: "Wrong org" });
 
-  res.json({
+  audit(req.user.orgId, req.user.userId, "fetch_message", { messageId: msg.msgId, keyVersion: msg.keyVersion });
+
+  return res.json({
     id: msg.msgId,
     keyVersion: msg.keyVersion,
     iv: msg.iv,
@@ -244,13 +347,23 @@ app.get("/api/messages/:id", requireAuth, (req, res) => {
   });
 });
 
-// ---------- Portal ----------
+// ========================
+// Portal static + /m/:id
+// ========================
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const portalDir = path.join(__dirname, "..", "portal");
 
 app.use("/portal", express.static(portalDir, { extensions: ["html"] }));
-app.get("/m/:id", (req, res) => res.sendFile(path.join(portalDir, "decrypt.html")));
+
+// Link-sharing route: open decrypt UI
+app.get("/m/:id", (req, res) => {
+  res.sendFile(path.join(portalDir, "decrypt.html"));
+});
+
+// Default
 app.get("/", (req, res) => res.redirect("/portal/compose.html"));
 
-app.listen(PORT, () => console.log(`QuantumMail server listening on ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`QuantumMail server listening on ${PORT}`);
+});
