@@ -1,18 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "QuantumMail Enterprise (MVP)",
+  "name": "QuantumMail (Envelope Encryption)",
   "version": "0.2.0",
-  "description": "Enterprise QuantumMail: org-managed AES keys with rotation (Model B).",
-  "permissions": [
-    "storage",
-    "activeTab",
-    "scripting",
-    "clipboardRead",
-    "clipboardWrite"
-  ],
+  "description": "Encrypt selected text into a secure link; decrypt via extension only.",
+  "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": [
     "http://localhost:5173/*",
-    "https://*.app.github.dev/*"
+    "https://*.app.github.dev/*",
+    "https://mail.google.com/*"
   ],
   "action": {
     "default_title": "QuantumMail",
@@ -25,17 +20,11 @@
   "content_scripts": [
     {
       "matches": [
-        "https://mail.google.com/*"
+        "https://mail.google.com/*",
+        "http://localhost:5173/*",
+        "https://*.app.github.dev/*"
       ],
-      "js": [
-        "content.js"
-      ],
-      "run_at": "document_idle"
+      "js": ["content.js"]
     }
-  ],
-  "icons": {
-    "16": "icons/icon16.png",
-    "48": "icons/icon48.png",
-    "128": "icons/icon128.png"
-  }
+  ]
 }
