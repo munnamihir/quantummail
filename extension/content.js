@@ -1,3 +1,5 @@
+// extension/content.js
+
 let lastSelectionText = "";
 
 document.addEventListener("selectionchange", () => {
@@ -23,7 +25,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
       if (msg?.type === "QM_INSERT_LINK") {
         const link = msg.url;
-
         const active = document.activeElement;
 
         if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT")) {
@@ -40,8 +41,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           return;
         }
 
-        // Gmail compose is contenteditable but sometimes activeElement isn't inside it.
-        // Fallback: try to find the compose body (best effort)
+        // Gmail fallback: try to find compose editor
         const editor = document.querySelector('[role="textbox"][contenteditable="true"]');
         if (editor) {
           editor.focus();
@@ -50,7 +50,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           return;
         }
 
-        sendResponse({ ok: false, error: "Could not insert link. Click inside the Gmail compose body and try again." });
+        sendResponse({
+          ok: false,
+          error: "Could not insert link. Click inside Gmail compose body and try again."
+        });
       }
     } catch (e) {
       sendResponse({ ok: false, error: e?.message || String(e) });
@@ -59,3 +62,31 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   return true;
 });
+
+// -----------------------
+// Decrypt bridge for /m/<id>
+// Portal page sends window.postMessage -> content script -> background -> page
+// -----------------------
+function getMsgIdFromPath() {
+  // /m/<id>
+  const parts = location.pathname.split("/").filter(Boolean);
+  if (parts[0] === "m" && parts[1]) return parts[1];
+  return null;
+}
+
+if (location.pathname.startsWith("/m/")) {
+  window.addEventListener("message", (event) => {
+    const data = event.data || {};
+    if (data?.source !== "quantummail-portal") return;
+    if (data?.type !== "QM_DECRYPT_REQUEST") return;
+
+    const msgId = data.msgId || getMsgIdFromPath();
+    chrome.runtime.sendMessage({ type: "QM_DECRYPT_LINK", msgId }, (resp) => {
+      const out = resp?.ok
+        ? { source: "quantummail-extension", type: "QM_DECRYPT_RESULT", ok: true, plaintext: resp.plaintext }
+        : { source: "quantummail-extension", type: "QM_DECRYPT_RESULT", ok: false, error: resp?.error || "Decrypt failed" };
+
+      window.postMessage(out, "*");
+    });
+  });
+}
