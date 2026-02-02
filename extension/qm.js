@@ -1,4 +1,4 @@
-// Shared helpers for popup/background (MV3-safe)
+// extension/qm.js
 
 export const DEFAULTS = {
   serverBase: "",
@@ -29,7 +29,7 @@ export async function clearSession() {
 export function parseRecipients(input) {
   return String(input || "")
     .split(",")
-    .map(s => s.trim())
+    .map((s) => s.trim())
     .filter(Boolean);
 }
 
@@ -47,7 +47,6 @@ export function bytesToB64(bytes) {
   return btoa(bin);
 }
 
-// base64url (no padding) for link-friendly payload
 export function bytesToB64Url(bytes) {
   return bytesToB64(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
@@ -60,7 +59,6 @@ export function b64UrlToBytes(b64url) {
 
 // ---------- Crypto primitives ----------
 export async function getOrCreateRsaKeypair() {
-  // Stored as JWK in chrome.storage.local for larger size + less sync churn
   const existing = await new Promise((resolve) => {
     chrome.storage.local.get({ qm_rsa: null }, (v) => resolve(v.qm_rsa));
   });
@@ -127,7 +125,7 @@ export async function ensureKeypairAndRegister(serverBase, token) {
   const res = await fetch(`${serverBase}/users/me/pubkey`, {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${token}`,
+      Authorization: `Bearer ${token}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify({ publicKeySpkiB64 })
@@ -137,9 +135,13 @@ export async function ensureKeypairAndRegister(serverBase, token) {
   if (!res.ok) throw new Error(data?.error || `pubkey_register failed (${res.status})`);
 }
 
-// AES-GCM envelope message encryption
+// AES-GCM envelope encryption
 export async function aesEncrypt(plaintext, aadText = "gmail") {
-  const dek = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
+  const dek = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, [
+    "encrypt",
+    "decrypt"
+  ]);
+
   const iv = crypto.getRandomValues(new Uint8Array(12));
 
   const ptBytes = new TextEncoder().encode(plaintext);
@@ -160,11 +162,25 @@ export async function aesEncrypt(plaintext, aadText = "gmail") {
   };
 }
 
-export async function rsaWrapDek(recipientPublicKey, rawDekBytes) {
-  const wrapped = await crypto.subtle.encrypt(
-    { name: "RSA-OAEP" },
-    recipientPublicKey,
-    rawDekBytes
+export async function aesDecrypt(ivB64Url, ctB64Url, aadText, rawDekBytes) {
+  const iv = b64UrlToBytes(ivB64Url);
+  const ct = b64UrlToBytes(ctB64Url);
+  const aadBytes = new TextEncoder().encode(aadText || "");
+
+  const dek = await crypto.subtle.importKey("raw", rawDekBytes, { name: "AES-GCM" }, false, [
+    "decrypt"
+  ]);
+
+  const pt = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv, additionalData: aadBytes },
+    dek,
+    ct
   );
+
+  return new TextDecoder().decode(pt);
+}
+
+export async function rsaWrapDek(recipientPublicKey, rawDekBytes) {
+  const wrapped = await crypto.subtle.encrypt({ name: "RSA-OAEP" }, recipientPublicKey, rawDekBytes);
   return bytesToB64Url(new Uint8Array(wrapped));
 }
