@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>QuantumMail Admin</title>
+  <link rel="stylesheet" href="/portal/styles.css" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 18px; }
+    .wrap { max-width: 1100px; margin: 0 auto; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 14px; margin-bottom: 14px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    input { padding: 10px; border-radius: 8px; border: 1px solid #bbb; min-width: 220px; }
+    button { padding: 10px 14px; border-radius: 8px; border: 1px solid #333; cursor: pointer; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { border-bottom: 1px solid #eee; padding: 8px; text-align: left; font-size: 14px; }
+    th { background: #fafafa; }
+    .muted { color: #666; font-size: 13px; }
+    .ok { color: #0a7a2f; }
+    .err { color: #b00020; }
+    code { background:#f2f2f2; padding: 2px 6px; border-radius: 6px; }
+    .pill { padding: 2px 8px; border-radius: 999px; border: 1px solid #ddd; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h2>QuantumMail Admin Dashboard</h2>
+    <div class="muted">Login as an <b>Admin</b> to rotate keys and view audit logs.</div>
+
+    <div class="card">
+      <div id="status" class="muted">Not signed in.</div>
+      <div id="error" class="err"></div>
+
+      <div id="loginBox" style="margin-top: 10px;">
+        <div class="row">
+          <input id="orgId" placeholder="Org ID (e.g., org_demo)" />
+          <input id="username" placeholder="Admin username" />
+          <input id="password" type="password" placeholder="Admin password" />
+          <button id="btnLogin">Login</button>
+          <button id="btnSeed">Seed Admin (dev)</button>
+        </div>
+        <div class="muted" style="margin-top:8px;">
+          Dev seed creates <code>admin/admin123</code> under <code>org_demo</code> if not present.
+        </div>
+      </div>
+
+      <div id="actionsBox" style="margin-top: 10px; display:none;">
+        <div class="row">
+          <button id="btnRefresh">Refresh</button>
+          <button id="btnRotate">Rotate Key</button>
+          <button id="btnCreateUser">Create Member</button>
+          <button id="btnLogout">Logout</button>
+        </div>
+        <div class="muted" style="margin-top:8px;">
+          Active Key Version: <span id="activeKey" class="pill">-</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Keys</h3>
+      <div class="muted">Key versions and statuses.</div>
+      <table id="keysTable">
+        <thead>
+          <tr>
+            <th>Version</th>
+            <th>Status</th>
+            <th>Created</th>
+            <th>Activated</th>
+            <th>Retired</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h3>Users</h3>
+      <div class="muted">Users in this org.</div>
+      <table id="usersTable">
+        <thead>
+          <tr>
+            <th>UserId</th>
+            <th>Username</th>
+            <th>Role</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h3>Audit Log</h3>
+      <div class="muted">Tracks key access, rotations, encryption, logins, etc.</div>
+      <table id="auditTable">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Action</th>
+            <th>UserId</th>
+            <th>Details</th>
+            <th>IP</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="muted">
+      Open: <code>/portal/admin.html</code>
+    </div>
+  </div>
+
+  <script type="module" src="/portal/admin.js"></script>
+</body>
+</html>
