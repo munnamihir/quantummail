@@ -1,4 +1,4 @@
-import mlkem from './vendor/mlkem.js';
+//import mlkem from './vendor/mlkem.js';
 
 const te = new TextEncoder();
 const td = new TextDecoder();
