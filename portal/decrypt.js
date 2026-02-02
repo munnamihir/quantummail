@@ -1,59 +1,48 @@
-function setStatus(msg) {
-  const el = document.getElementById("status");
-  if (el) el.textContent = msg;
-}
-function setError(msg) {
-  const el = document.getElementById("err");
-  if (el) el.textContent = msg || "";
-}
-function setPlaintext(msg) {
-  const el = document.getElementById("plaintext");
-  if (el) el.textContent = msg || "";
-}
+// portal/decrypt.js
+const $ = (id) => document.getElementById(id);
 
-function getMsgId() {
+function getMsgIdFromPath() {
+  // /m/<id>
   const parts = location.pathname.split("/").filter(Boolean);
-  const i = parts.indexOf("m");
-  if (i >= 0 && parts[i + 1]) return parts[i + 1];
-  return parts[parts.length - 1] || "";
+  if (parts[0] === "m" && parts[1]) return parts[1];
+  return "";
 }
 
-const msgId = getMsgId();
+function ok(msg) { $("ok").textContent = msg || ""; }
+function err(msg) { $("err").textContent = msg || ""; }
+
+const msgId = getMsgIdFromPath();
+$("msgId").textContent = msgId || "-";
 
 function requestDecrypt() {
-  setError("");
-  setStatus("Requesting decrypt from extension…");
+  ok(""); err("");
+  $("out").value = "";
 
-  // Page -> content script -> background
+  if (!msgId) {
+    err("No message id in URL.");
+    return;
+  }
+
+  // Ask the extension (via content-script bridge)
   window.postMessage(
-    {
-      source: "quantummail-portal",
-      type: "QM_DECRYPT_REQUEST",
-      msgId,
-      origin: location.origin
-    },
+    { source: "quantummail-portal", type: "QM_DECRYPT_REQUEST", msgId, origin: window.location.origin },
     "*"
   );
+
+  ok("Decrypt request sent… (make sure you are logged in in the extension)");
 }
 
 window.addEventListener("message", (event) => {
   const data = event.data || {};
   if (data?.source !== "quantummail-extension") return;
+  if (data?.type !== "QM_DECRYPT_RESULT") return;
 
-  if (data.type === "QM_DECRYPT_RESULT") {
-    if (data.ok) {
-      setStatus("Decrypted ✅");
-      setPlaintext(data.plaintext || "");
-    } else {
-      setStatus("Failed");
-      setError(data.error || "Decrypt failed");
-    }
+  if (data.ok) {
+    ok("Decrypted ✅");
+    $("out").value = data.plaintext || "";
+  } else {
+    err(data.error || "Decrypt failed");
   }
 });
 
-document.getElementById("btnDecrypt")?.addEventListener("click", requestDecrypt);
-
-// Helpful message if extension not installed
-setTimeout(() => {
-  setStatus("If nothing happens, make sure the QuantumMail extension is installed and enabled.");
-}, 800);
+$("btnDecrypt").addEventListener("click", requestDecrypt);
