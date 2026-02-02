@@ -2,49 +2,54 @@ import express from "express";
 import { nanoid } from "nanoid";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import crypto from "crypto";
 import path from "path";
 import { fileURLToPath } from "url";
-
-// If you already added JSON persistence, keep your persist.js and uncomment below:
-// import { loadDbOrDefault, scheduleSaveDb, dataFilePath } from "./persist.js";
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
+// ✅ Request logger (helps debug 404s fast)
+app.use((req, _res, next) => {
+  console.log(`${req.method} ${req.url}`);
+  next();
+});
+
+// ========================
+// CONFIG
+// ========================
 const PORT = process.env.PORT || 5173;
 const JWT_SECRET = process.env.JWT_SECRET || "dev_jwt_secret_change_me";
 
-// -----------------------
-// DB (in-memory by default)
-// If you already have persist.js, swap to loadDbOrDefault + scheduleSaveDb.
-// -----------------------
+// ========================
+// DB (in-memory MVP)
+// NOTE: If you already have server/persist.js, you can swap this DB for your persisted DB.
+// ========================
 const db = {
-  orgs: new Map(),     // orgId -> {orgId, name}
-  users: new Map(),    // userId -> {userId, orgId, username, passwordHash, role, status, publicKeySpkiB64?}
-  messages: new Map(), // msgId -> {msgId, orgId, createdBy, iv, ciphertext, aad, wrappedKeys, createdAt}
+  orgs: new Map(),     // orgId -> { orgId, name }
+  users: new Map(),    // userId -> { userId, orgId, username, passwordHash, role, status, publicKeySpkiB64 }
+  messages: new Map(), // msgId -> { msgId, orgId, createdBy, iv, ciphertext, aad, wrappedKeys, createdAt }
   audit: []            // array
 };
 
-function saveDb() {
-  // If you have scheduleSaveDb(db), call it here
-  // scheduleSaveDb(db);
-}
+// If you have persistence, call scheduleSaveDb(db) here after writes.
+function saveDb() { /* no-op for in-memory */ }
 
+// Ensure a demo org exists
 function ensureOrg(orgId, name = "Demo Company") {
   if (!db.orgs.has(orgId)) db.orgs.set(orgId, { orgId, name });
 }
 ensureOrg("org_demo", "Demo Company");
 
-// -----------------------
-// Utils
-// -----------------------
+// Build base URL for Codespaces forwarded ports
 function getPublicBase(req) {
   const proto = req.headers["x-forwarded-proto"] || "http";
   const host = req.headers["x-forwarded-host"] || req.headers.host;
   return `${proto}://${host}`;
 }
 
+// ========================
+// AUDIT
+// ========================
 function audit(orgId, userId, action, details = {}, req = null) {
   db.audit.push({
     id: nanoid(10),
@@ -59,16 +64,16 @@ function audit(orgId, userId, action, details = {}, req = null) {
   saveDb();
 }
 
-// -----------------------
-// Auth middleware
-// -----------------------
+// ========================
+// AUTH MIDDLEWARE
+// ========================
 function requireAuth(req, res, next) {
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : null;
   if (!token) return res.status(401).json({ error: "Missing Bearer token" });
 
   try {
-    req.user = jwt.verify(token, JWT_SECRET);
+    req.user = jwt.verify(token, JWT_SECRET); // { userId, orgId, role, username }
     return next();
   } catch {
     return res.status(401).json({ error: "Invalid token" });
@@ -80,9 +85,9 @@ function requireAdmin(req, res, next) {
   return next();
 }
 
-// -----------------------
-// DEV: Seed Admin
-// -----------------------
+// ========================
+// DEV: SEED ADMIN
+// ========================
 app.post("/dev/seed-admin", async (req, res) => {
   const { orgId = "org_demo", username = "admin", password = "admin123" } = req.body || {};
   ensureOrg(orgId, "New Org");
@@ -107,13 +112,12 @@ app.post("/dev/seed-admin", async (req, res) => {
 
   saveDb();
   audit(orgId, userId, "seed_admin", { username }, req);
-
   return res.json({ ok: true, orgId, username, password });
 });
 
-// -----------------------
-// Login
-// -----------------------
+// ========================
+// AUTH: LOGIN
+// ========================
 app.post("/auth/login", async (req, res) => {
   const { orgId, username, password } = req.body || {};
   if (!orgId || !username || !password) {
@@ -142,9 +146,9 @@ app.post("/auth/login", async (req, res) => {
   });
 });
 
-// -----------------------
-// Admin: create user
-// -----------------------
+// ========================
+// ADMIN: CREATE USER (Member/Admin)
+// ========================
 app.post("/admin/users", requireAuth, requireAdmin, async (req, res) => {
   const { username, password, role = "Member" } = req.body || {};
   if (!username || !password) return res.status(400).json({ error: "username/password required" });
@@ -176,9 +180,26 @@ app.post("/admin/users", requireAuth, requireAdmin, async (req, res) => {
   return res.json({ ok: true, userId, username, role });
 });
 
-// -----------------------
-// Admin: Audit log
-// -----------------------
+// ✅ ADMIN: LIST USERS (fixes “Cannot GET /admin/users”)
+app.get("/admin/users", requireAuth, requireAdmin, (req, res) => {
+  const orgId = req.user.orgId;
+
+  const users = Array.from(db.users.values())
+    .filter(u => u.orgId === orgId)
+    .map(u => ({
+      userId: u.userId,
+      username: u.username,
+      role: u.role,
+      status: u.status,
+      hasPublicKey: !!u.publicKeySpkiB64
+    }));
+
+  return res.json({ users });
+});
+
+// ========================
+// ADMIN: AUDIT LOG
+// ========================
 app.get("/admin/audit", requireAuth, requireAdmin, (req, res) => {
   const orgId = req.user.orgId;
   const limit = Math.min(Number(req.query.limit || 200), 1000);
@@ -188,12 +209,12 @@ app.get("/admin/audit", requireAuth, requireAdmin, (req, res) => {
     .slice(-limit)
     .reverse();
 
-  res.json({ items });
+  return res.json({ items });
 });
 
-// -----------------------
-// USER: register my public key
-// -----------------------
+// ========================
+// USER: REGISTER MY PUBLIC KEY (SPKI base64)
+// ========================
 app.post("/users/me/pubkey", requireAuth, (req, res) => {
   const { publicKeySpkiB64 } = req.body || {};
   if (!publicKeySpkiB64 || typeof publicKeySpkiB64 !== "string") {
@@ -210,10 +231,9 @@ app.post("/users/me/pubkey", requireAuth, (req, res) => {
   return res.json({ ok: true });
 });
 
-// -----------------------
-// ORG: list users with public keys (for wrapping)
-// Auth required, same org only.
-// -----------------------
+// ========================
+// ORG: LIST USERS + PUBKEYS (for wrapping DEK)
+// ========================
 app.get("/org/users", requireAuth, (req, res) => {
   const orgId = req.user.orgId;
 
@@ -224,22 +244,27 @@ app.get("/org/users", requireAuth, (req, res) => {
       username: u.username,
       role: u.role,
       hasPublicKey: !!u.publicKeySpkiB64,
-      publicKeySpkiB64: u.publicKeySpkiB64 // sender needs it to wrap DEK
+      publicKeySpkiB64: u.publicKeySpkiB64
     }));
 
   return res.json({ users });
 });
 
-// -----------------------
-// Messages (Envelope encryption)
-// POST /api/messages stores ciphertext + wrappedKeys map
-// wrappedKeys: { [userId]: wrappedDekB64url }
-// -----------------------
+// ========================
+// MESSAGES: ENVELOPE ENCRYPTION STORE
+// body: { iv, ciphertext, aad?, wrappedKeys: { [userId]: wrappedDekB64url } }
+// ========================
 app.post("/api/messages", requireAuth, (req, res) => {
   const { iv, ciphertext, aad, wrappedKeys } = req.body || {};
 
   if (!iv || !ciphertext || !wrappedKeys || typeof wrappedKeys !== "object") {
     return res.status(400).json({ error: "iv, ciphertext, wrappedKeys required" });
+  }
+
+  // Ensure sender always included (optional but recommended)
+  const senderId = req.user.userId;
+  if (!wrappedKeys[senderId]) {
+    return res.status(400).json({ error: "wrappedKeys must include sender userId" });
   }
 
   const msgId = nanoid(12);
@@ -248,23 +273,23 @@ app.post("/api/messages", requireAuth, (req, res) => {
   db.messages.set(msgId, {
     msgId,
     orgId: req.user.orgId,
-    createdBy: req.user.userId,
+    createdBy: senderId,
     iv,
     ciphertext,
     aad: aad || null,
-    wrappedKeys, // {userId: wrappedDekB64url}
+    wrappedKeys,
     createdAt
   });
 
   saveDb();
-  audit(req.user.orgId, req.user.userId, "encrypt_store", { messageId: msgId }, req);
+  audit(req.user.orgId, senderId, "encrypt_store", { messageId: msgId }, req);
 
   const base = getPublicBase(req);
   const url = `${base}/m/${msgId}`;
   return res.json({ id: msgId, url });
 });
 
-// GET /api/messages/:id returns ciphertext + wrappedKey ONLY for requesting user
+// GET returns only the wrapped DEK for the requesting user
 app.get("/api/messages/:id", requireAuth, (req, res) => {
   const msg = db.messages.get(req.params.id);
   if (!msg) return res.status(404).json({ error: "Not found" });
@@ -283,24 +308,26 @@ app.get("/api/messages/:id", requireAuth, (req, res) => {
     iv: msg.iv,
     ciphertext: msg.ciphertext,
     aad: msg.aad,
-    wrappedDek,           // ONLY for current user
+    wrappedDek,
     createdAt: msg.createdAt
   });
 });
 
-// -----------------------
-// Portal static + /m/:id
-// -----------------------
+// ========================
+// PORTAL STATIC + /m/:id -> decrypt.html
+// ========================
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const portalDir = path.join(__dirname, "..", "portal");
 
 app.use("/portal", express.static(portalDir, { extensions: ["html"] }));
 
+// Decrypt link route (public page; API calls require auth)
 app.get("/m/:id", (req, res) => {
   res.sendFile(path.join(portalDir, "decrypt.html"));
 });
 
+// Default landing
 app.get("/", (req, res) => res.redirect("/portal/compose.html"));
 
 app.listen(PORT, () => {
