@@ -1,7 +1,3 @@
-// server/persist.js
-// Simple JSON persistence for MVP (Codespaces-friendly).
-// Stores db state to server/data.json so links/users/keys survive restarts.
-
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -11,7 +7,6 @@ const __dirname = path.dirname(__filename);
 
 const DATA_FILE = path.join(__dirname, "data.json");
 
-// ---------- Map <-> JSON helpers ----------
 function mapToObj(map) {
   const obj = {};
   for (const [k, v] of map.entries()) obj[k] = v;
@@ -25,7 +20,6 @@ function objToMap(obj) {
   return m;
 }
 
-// ---------- Load / Save ----------
 export function loadDbOrDefault(defaultDb) {
   try {
     if (!fs.existsSync(DATA_FILE)) return defaultDb;
@@ -46,7 +40,6 @@ export function loadDbOrDefault(defaultDb) {
   }
 }
 
-// Debounced saving to avoid writing file too often
 let saveTimer = null;
 
 export function scheduleSaveDb(db) {
@@ -64,7 +57,7 @@ export function scheduleSaveDb(db) {
     } catch (e) {
       console.error("❌ Failed to save data.json:", e?.message || e);
     }
-  }, 150); // small debounce window
+  }, 150);
 }
 
 export function dataFilePath() {
