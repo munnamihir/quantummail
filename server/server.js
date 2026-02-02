@@ -15,17 +15,15 @@ app.use(express.json({ limit: "1mb" }));
 // ========================
 const PORT = process.env.PORT || 5173;
 
-// Put these in Codespaces Secrets / environment in real usage
+// For MVP you can keep defaults; in prod set env vars.
 const JWT_SECRET = process.env.JWT_SECRET || "dev_jwt_secret_change_me";
 const SERVER_WRAP_SECRET =
   process.env.SERVER_WRAP_SECRET || "dev_wrap_secret_change_me_32bytes_min";
 
-// Derive 32 bytes AES-256 wrap key from secret string
 function getWrapKey() {
   return crypto.createHash("sha256").update(String(SERVER_WRAP_SECRET)).digest();
 }
 
-// Helper: build public base URL in Codespaces forwarded ports
 function getPublicBase(req) {
   const proto = req.headers["x-forwarded-proto"] || "http";
   const host = req.headers["x-forwarded-host"] || req.headers.host;
@@ -33,7 +31,7 @@ function getPublicBase(req) {
 }
 
 // ========================
-// In-memory MVP DB
+// Persistent DB (JSON file)
 // ========================
 const defaultDb = {
   orgs: new Map(),
@@ -46,30 +44,38 @@ const defaultDb = {
 const db = loadDbOrDefault(defaultDb);
 console.log("📦 Persistence file:", dataFilePath());
 
-
-function seed() {
-  const orgId = "org_demo";
+// Ensure default org exists (safe)
+function ensureOrg(orgId, name = "Demo Company") {
   if (!db.orgs.has(orgId)) {
-    db.orgs.set(orgId, { orgId, name: "Demo Company" });
+    db.orgs.set(orgId, { orgId, name });
+  }
+  if (!db.keys.has(orgId)) {
     db.keys.set(orgId, []);
   }
 }
-seed();
+ensureOrg("org_demo", "Demo Company");
+scheduleSaveDb(db);
 
 // ========================
-// Auth middleware
+// Audit
 // ========================
-function audit(orgId, userId, action, details = {}) {
+function audit(orgId, userId, action, details = {}, req = null) {
   db.audit.push({
     id: nanoid(10),
     orgId,
     userId,
     action,
     ...details,
+    ip: req?.headers["x-forwarded-for"] || req?.socket?.remoteAddress || null,
+    ua: req?.headers["user-agent"] || null,
     at: new Date().toISOString()
   });
+  scheduleSaveDb(db);
 }
 
+// ========================
+// Auth middleware
+// ========================
 function requireAuth(req, res, next) {
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : null;
@@ -90,7 +96,7 @@ function requireAdmin(req, res, next) {
 }
 
 // ========================
-// Key wrapping: encrypt AES keys at rest using server secret
+// Key wrapping (AES-256-GCM)
 // ========================
 function wrapRawKey(rawKeyBytes) {
   const wrapKey = getWrapKey();
@@ -113,22 +119,29 @@ function unwrapRawKey(wrapped) {
 
   const decipher = crypto.createDecipheriv("aes-256-gcm", wrapKey, iv);
   decipher.setAuthTag(tag);
-  return Buffer.concat([decipher.update(ct), decipher.final()]); // Buffer(32)
+  return Buffer.concat([decipher.update(ct), decipher.final()]);
 }
 
 // ========================
-// Auth endpoints
+// Helpers
 // ========================
+function getOrgKeys(orgId) {
+  if (!db.keys.has(orgId)) db.keys.set(orgId, []);
+  return db.keys.get(orgId);
+}
 
-// Dev helper: create a demo admin quickly.
-// Remove/disable this in production.
+function getActiveKeyRecord(orgId) {
+  const keys = getOrgKeys(orgId);
+  return keys.find((k) => k.status === "Active") || null;
+}
+
+// ========================
+// DEV: Seed Admin
+// ========================
 app.post("/dev/seed-admin", async (req, res) => {
   const { orgId = "org_demo", username = "admin", password = "admin123" } = req.body || {};
 
-  if (!db.orgs.has(orgId)) {
-    db.orgs.set(orgId, { orgId, name: "New Org" });
-    db.keys.set(orgId, []);
-  }
+  ensureOrg(orgId, "New Org");
 
   const exists = Array.from(db.users.values()).some(
     (u) => u.orgId === orgId && u.username === username
@@ -148,10 +161,14 @@ app.post("/dev/seed-admin", async (req, res) => {
   });
 
   scheduleSaveDb(db);
+  audit(orgId, userId, "seed_admin", { username }, req);
 
   return res.json({ ok: true, orgId, username, password });
 });
 
+// ========================
+// Login
+// ========================
 app.post("/auth/login", async (req, res) => {
   const { orgId, username, password } = req.body || {};
   if (!orgId || !username || !password) {
@@ -172,20 +189,21 @@ app.post("/auth/login", async (req, res) => {
     { expiresIn: "8h" }
   );
 
-  audit(user.orgId, user.userId, "login");
+  audit(user.orgId, user.userId, "login", {}, req);
+
   return res.json({
     token,
     user: { userId: user.userId, orgId: user.orgId, role: user.role, username: user.username }
   });
 });
 
-// Admin creates team users
+// ========================
+// Admin: create users
+// ========================
 app.post("/admin/users", requireAuth, requireAdmin, async (req, res) => {
   const { username, password, role = "Member" } = req.body || {};
   if (!username || !password) return res.status(400).json({ error: "username/password required" });
-  if (!["Admin", "Member"].includes(role)) {
-    return res.status(400).json({ error: "role must be Admin|Member" });
-  }
+  if (!["Admin", "Member"].includes(role)) return res.status(400).json({ error: "role must be Admin|Member" });
 
   const orgId = req.user.orgId;
 
@@ -205,26 +223,32 @@ app.post("/admin/users", requireAuth, requireAdmin, async (req, res) => {
     role,
     status: "Active"
   });
-  
+
   scheduleSaveDb(db);
-  audit(orgId, req.user.userId, "create_user", { targetUserId: userId, username, role });
+  audit(orgId, req.user.userId, "create_user", { targetUserId: userId, username, role }, req);
+
   return res.json({ ok: true, userId, username, role });
 });
 
-// ========================
-// Managed AES Keys with Rotation
-// ========================
-function getOrgKeys(orgId) {
-  if (!db.keys.has(orgId)) db.keys.set(orgId, []);
-  return db.keys.get(orgId);
-}
+// Admin: list users
+app.get("/admin/users", requireAuth, requireAdmin, (req, res) => {
+  const orgId = req.user.orgId;
 
-function getActiveKeyRecord(orgId) {
-  const keys = getOrgKeys(orgId);
-  return keys.find((k) => k.status === "Active") || null;
-}
+  const users = Array.from(db.users.values())
+    .filter(u => u.orgId === orgId)
+    .map(u => ({
+      userId: u.userId,
+      username: u.username,
+      role: u.role,
+      status: u.status
+    }));
 
-// Admin: rotate (or create first) key
+  res.json({ users });
+});
+
+// ========================
+// Admin: Keys Rotation
+// ========================
 app.post("/admin/keys/rotate", requireAuth, requireAdmin, (req, res) => {
   const orgId = req.user.orgId;
   const keys = getOrgKeys(orgId);
@@ -232,11 +256,9 @@ app.post("/admin/keys/rotate", requireAuth, requireAdmin, (req, res) => {
   const active = getActiveKeyRecord(orgId);
   const nextVersion = active ? active.version + 1 : 1;
 
-  // New raw AES-256 key
   const rawKey = crypto.randomBytes(32);
   const wrapped = wrapRawKey(rawKey);
 
-  // Mark previous active as Retiring
   if (active) active.status = "Retiring";
 
   const now = new Date().toISOString();
@@ -250,14 +272,15 @@ app.post("/admin/keys/rotate", requireAuth, requireAdmin, (req, res) => {
   });
 
   scheduleSaveDb(db);
-  audit(orgId, req.user.userId, "rotate_key", { keyVersion: nextVersion });
+  audit(orgId, req.user.userId, "rotate_key", { keyVersion: nextVersion }, req);
+
   return res.json({ ok: true, activeVersion: nextVersion });
 });
 
-// Admin: retire old key version (prevents decrypt)
 app.post("/admin/keys/:version/retire", requireAuth, requireAdmin, (req, res) => {
   const orgId = req.user.orgId;
   const version = Number(req.params.version);
+
   const keys = getOrgKeys(orgId);
   const key = keys.find((k) => k.version === version);
   if (!key) return res.status(404).json({ error: "Key not found" });
@@ -271,18 +294,34 @@ app.post("/admin/keys/:version/retire", requireAuth, requireAdmin, (req, res) =>
   key.retiredAt = new Date().toISOString();
 
   scheduleSaveDb(db);
-  audit(orgId, req.user.userId, "retire_key", { keyVersion: version });
+  audit(orgId, req.user.userId, "retire_key", { keyVersion: version }, req);
+
   return res.json({ ok: true });
 });
 
-// Member: get active key version
+// Admin: list keys (metadata only)
+app.get("/admin/keys", requireAuth, requireAdmin, (req, res) => {
+  const orgId = req.user.orgId;
+  const keys = getOrgKeys(orgId).map(k => ({
+    version: k.version,
+    status: k.status,
+    createdAt: k.createdAt,
+    activatedAt: k.activatedAt,
+    retiredAt: k.retiredAt
+  }));
+
+  res.json({ keys });
+});
+
+// ========================
+// Member: Key info / material
+// ========================
 app.get("/keys/active", requireAuth, (req, res) => {
   const active = getActiveKeyRecord(req.user.orgId);
   if (!active) return res.status(404).json({ error: "No active key. Admin must rotate/create one." });
   return res.json({ version: active.version });
 });
 
-// Member: get key material for a version (MVP returns raw key bytes base64url)
 app.get("/keys/:version/material", requireAuth, (req, res) => {
   const orgId = req.user.orgId;
   const version = Number(req.params.version);
@@ -295,12 +334,14 @@ app.get("/keys/:version/material", requireAuth, (req, res) => {
 
   const raw = unwrapRawKey(key.wrappedKey);
 
-  audit(orgId, req.user.userId, "get_key_material", { keyVersion: version });
+  // 🔥 This is the event you want to track in dashboard ("who accessed keys")
+  audit(orgId, req.user.userId, "get_key_material", { keyVersion: version }, req);
+
   return res.json({ version, alg: "AES-GCM-256", keyB64: raw.toString("base64url") });
 });
 
 // ========================
-// Messages (Model B)
+// Messages (link sharing)
 // ========================
 app.post("/api/messages", requireAuth, (req, res) => {
   const { keyVersion, iv, ciphertext, aad } = req.body || {};
@@ -323,7 +364,7 @@ app.post("/api/messages", requireAuth, (req, res) => {
   });
 
   scheduleSaveDb(db);
-  audit(req.user.orgId, req.user.userId, "encrypt", { messageId: id, keyVersion: Number(keyVersion) });
+  audit(req.user.orgId, req.user.userId, "encrypt", { messageId: id, keyVersion: Number(keyVersion) }, req);
 
   const base = getPublicBase(req);
   const url = `${base}/m/${id}`;
@@ -335,7 +376,7 @@ app.get("/api/messages/:id", requireAuth, (req, res) => {
   if (!msg) return res.status(404).json({ error: "Not found" });
   if (msg.orgId !== req.user.orgId) return res.status(403).json({ error: "Wrong org" });
 
-  audit(req.user.orgId, req.user.userId, "fetch_message", { messageId: msg.msgId, keyVersion: msg.keyVersion });
+  audit(req.user.orgId, req.user.userId, "fetch_message", { messageId: msg.msgId, keyVersion: msg.keyVersion }, req);
 
   return res.json({
     id: msg.msgId,
@@ -348,7 +389,22 @@ app.get("/api/messages/:id", requireAuth, (req, res) => {
 });
 
 // ========================
-// Portal static + /m/:id
+// Admin: Audit log
+// ========================
+app.get("/admin/audit", requireAuth, requireAdmin, (req, res) => {
+  const orgId = req.user.orgId;
+  const limit = Math.min(Number(req.query.limit || 200), 1000);
+
+  const items = (db.audit || [])
+    .filter(a => a.orgId === orgId)
+    .slice(-limit)
+    .reverse();
+
+  res.json({ items });
+});
+
+// ========================
+// Portal static + routes
 // ========================
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -356,12 +412,10 @@ const portalDir = path.join(__dirname, "..", "portal");
 
 app.use("/portal", express.static(portalDir, { extensions: ["html"] }));
 
-// Link-sharing route: open decrypt UI
 app.get("/m/:id", (req, res) => {
   res.sendFile(path.join(portalDir, "decrypt.html"));
 });
 
-// Default
 app.get("/", (req, res) => res.redirect("/portal/compose.html"));
 
 app.listen(PORT, () => {
