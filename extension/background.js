@@ -124,7 +124,7 @@ async function encryptSelectionOrgWide(session) {
   if (!url) throw new Error("Server did not return url");
 
   // 6) Insert link into Gmail/editor
-  const ins = await tabMessage(tab.id, { type: "QM_INSERT_LINK", url });
+  const ins = await tabMessage(tab.id, { type: "QM_REPLACE_SELECTION_WITH_LINK", url });
   if (!ins?.ok) throw new Error(ins?.error || "Could not insert link");
 
   return { url, skippedNoKey, wrappedCount };
