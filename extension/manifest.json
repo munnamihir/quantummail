@@ -19,7 +19,12 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://mail.google.com/*", "https://*.app.github.dev/*"],
+      "matches": [
+      "https://mail.google.com/*",
+      "https://outlook.office.com/*",
+      "https://outlook.live.com/*",
+      "https://*.app.github.dev/*"
+      ],
       "js": ["content.js"],
       "run_at": "document_idle"
     }
