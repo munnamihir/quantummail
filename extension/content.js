@@ -1,112 +1,122 @@
-// extension/content.js (Gmail-safe selection caching + insert link + decrypt bridge)
+// extension/content.js
+// Gmail-safe selection caching + REPLACE selection with link + decrypt bridge
 
 let cachedSelectionText = "";
-let lastActiveCompose = null;
+let cachedRange = null;
 
-// Track focus to remember the compose editor
-document.addEventListener("focusin", (e) => {
-  const el = e.target;
-  if (!el) return;
-
-  // Gmail compose body is usually contenteditable + role="textbox"
-  if (el.isContentEditable || el.getAttribute?.("contenteditable") === "true") {
-    const role = el.getAttribute?.("role");
-    if (role === "textbox" || role === "combobox" || role === "document" || role === "main" || role === "presentation") {
-      lastActiveCompose = el;
-    } else {
-      // Still keep it if editable; Gmail can be inconsistent
-      lastActiveCompose = el;
-    }
+function cloneRangeIfPossible(sel) {
+  try {
+    if (!sel || sel.rangeCount === 0) return null;
+    const r = sel.getRangeAt(0);
+    // clone so it survives focus changes a bit better
+    return r.cloneRange();
+  } catch {
+    return null;
   }
-});
+}
 
-// Cache selection aggressively (mouse up + key up + selectionchange)
-function tryCacheSelection() {
+function cacheSelection() {
   try {
     const sel = window.getSelection?.();
     if (!sel) return;
 
-    // If something is selected
     const text = String(sel.toString() || "").trim();
-    if (text) {
-      cachedSelectionText = text;
-      return;
-    }
+    if (text) cachedSelectionText = text;
 
-    // If no selection text, keep previous cache
+    const range = cloneRangeIfPossible(sel);
+    if (range) cachedRange = range;
   } catch {}
 }
 
-document.addEventListener("mouseup", tryCacheSelection);
-document.addEventListener("keyup", tryCacheSelection);
-document.addEventListener("selectionchange", tryCacheSelection);
+// Cache selection aggressively
+document.addEventListener("mouseup", cacheSelection);
+document.addEventListener("keyup", cacheSelection);
+document.addEventListener("selectionchange", cacheSelection);
 
-// Gmail fallback: attempt to read selected range in compose editor
-function getSelectionFromComposeFallback() {
-  try {
-    const sel = window.getSelection?.();
-    if (!sel || sel.rangeCount === 0) return "";
-
-    const range = sel.getRangeAt(0);
-    const text = String(range.toString() || "").trim();
-    if (text) return text;
-
-    // If selection is collapsed, try using cached
-    return "";
-  } catch {
-    return "";
-  }
-}
-
+// Get best-available selection text
 function getSelectionTextRobust() {
-  // 1) Current live selection
   try {
     const live = String(window.getSelection?.()?.toString() || "").trim();
     if (live) return live;
   } catch {}
 
-  // 2) Fallback via range
-  const ranged = getSelectionFromComposeFallback();
-  if (ranged) return ranged;
-
-  // 3) Cached selection
   if (cachedSelectionText) return cachedSelectionText;
-
   return "";
 }
 
-// Insert link into Gmail editor reliably
-function insertIntoCompose(link) {
-  // Prefer current focused editable
-  const active = document.activeElement;
-
-  // Input/textarea
-  if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT")) {
-    const start = active.selectionStart ?? active.value.length;
-    const end = active.selectionEnd ?? active.value.length;
-    active.value = active.value.slice(0, start) + link + active.value.slice(end);
-    return true;
+function isLikelyGmailEditor(node) {
+  if (!node) return false;
+  if (node.nodeType === Node.ELEMENT_NODE) {
+    const el = node;
+    if (el.isContentEditable) return true;
+    if (el.getAttribute?.("contenteditable") === "true") return true;
   }
+  return false;
+}
 
-  // Contenteditable focused
-  if (active && active.isContentEditable) {
-    active.focus();
+function replaceUsingExecCommand(link) {
+  try {
+    // Works when selection is still active
     document.execCommand("insertText", false, link);
     return true;
+  } catch {
+    return false;
   }
+}
 
-  // Gmail compose fallback: role textbox editable
+function replaceUsingCachedRange(link) {
+  try {
+    if (!cachedRange) return false;
+
+    const range = cachedRange;
+
+    // Ensure range is still connected to DOM
+    const common = range.commonAncestorContainer;
+    const containerEl = common.nodeType === Node.ELEMENT_NODE ? common : common.parentElement;
+
+    if (!containerEl || !document.contains(containerEl)) return false;
+
+    // Gmail editor often uses contenteditable divs — ensure we are inside something editable
+    let cur = containerEl;
+    let okEditable = false;
+    while (cur && cur !== document.body) {
+      if (cur.isContentEditable || cur.getAttribute?.("contenteditable") === "true") {
+        okEditable = true;
+        break;
+      }
+      cur = cur.parentElement;
+    }
+    if (!okEditable) return false;
+
+    // Replace selected content
+    range.deleteContents();
+    range.insertNode(document.createTextNode(link));
+
+    // Move caret to end of inserted link
+    range.collapse(false);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// If we can't replace selection, fallback: insert at compose cursor
+function insertIntoComposeFallback(link) {
   const editor =
-    lastActiveCompose ||
-    document.querySelector('[role="textbox"][contenteditable="true"]') ||
-    document.querySelector('div[aria-label][contenteditable="true"]');
+    document.activeElement?.isContentEditable
+      ? document.activeElement
+      : document.querySelector('[role="textbox"][contenteditable="true"]') ||
+        document.querySelector('div[aria-label][contenteditable="true"]');
 
   if (editor) {
     editor.focus();
     document.execCommand("insertText", false, link);
     return true;
   }
-
   return false;
 }
 
@@ -119,23 +129,44 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         return;
       }
 
-      if (msg?.type === "QM_INSERT_LINK") {
-        const url = msg.url;
+      // ✅ Replace currently selected text with link
+      if (msg?.type === "QM_REPLACE_SELECTION_WITH_LINK") {
+        const url = String(msg.url || "").trim();
         if (!url) {
           sendResponse({ ok: false, error: "Missing url" });
           return;
         }
 
-        const ok = insertIntoCompose(url);
-        if (!ok) {
+        // 1) Try direct replace with current selection
+        const directOk = replaceUsingExecCommand(url);
+        if (directOk) {
+          // clear cache to avoid accidental reuse
+          cachedSelectionText = "";
+          cachedRange = null;
+          sendResponse({ ok: true });
+          return;
+        }
+
+        // 2) Try cached range (handles popup stealing focus)
+        const cachedOk = replaceUsingCachedRange(url);
+        if (cachedOk) {
+          cachedSelectionText = "";
+          cachedRange = null;
+          sendResponse({ ok: true });
+          return;
+        }
+
+        // 3) Fallback insert (not perfect, but better than nothing)
+        const fallbackOk = insertIntoComposeFallback(url);
+        if (!fallbackOk) {
           sendResponse({
             ok: false,
-            error: "Could not insert link. Click inside Gmail compose body and try again."
+            error: "Could not replace selection. Re-select text in the compose body and try again."
           });
           return;
         }
 
-        sendResponse({ ok: true });
+        sendResponse({ ok: true, warning: "Inserted link, but could not delete original selection." });
         return;
       }
 
@@ -150,7 +181,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
 // -----------------------
 // Decrypt bridge for /m/<id>
-// Portal page sends window.postMessage -> content script -> background -> page
 // -----------------------
 function getMsgIdFromPath() {
   const parts = location.pathname.split("/").filter(Boolean);
