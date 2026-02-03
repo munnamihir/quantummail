@@ -1,21 +1,20 @@
 // extension/content.js
-// Gmail-safe selection caching + REPLACE selection with link + decrypt bridge
+// Gmail-safe selection caching (polling) + replace selection with link + decrypt bridge
 
 let cachedSelectionText = "";
 let cachedRange = null;
+let lastActiveCompose = null;
 
 function cloneRangeIfPossible(sel) {
   try {
     if (!sel || sel.rangeCount === 0) return null;
-    const r = sel.getRangeAt(0);
-    // clone so it survives focus changes a bit better
-    return r.cloneRange();
+    return sel.getRangeAt(0).cloneRange();
   } catch {
     return null;
   }
 }
 
-function cacheSelection() {
+function cacheSelectionNow() {
   try {
     const sel = window.getSelection?.();
     if (!sel) return;
@@ -23,60 +22,57 @@ function cacheSelection() {
     const text = String(sel.toString() || "").trim();
     if (text) cachedSelectionText = text;
 
-    const range = cloneRangeIfPossible(sel);
-    if (range) cachedRange = range;
+    const r = cloneRangeIfPossible(sel);
+    if (r && text) cachedRange = r;
   } catch {}
 }
 
-// Cache selection aggressively
-document.addEventListener("mouseup", cacheSelection);
-document.addEventListener("keyup", cacheSelection);
-document.addEventListener("selectionchange", cacheSelection);
+// Track last focused compose editor
+document.addEventListener("focusin", (e) => {
+  const el = e.target;
+  if (!el) return;
 
-// Get best-available selection text
+  // Gmail compose is usually [role="textbox"][contenteditable=true]
+  if (el.isContentEditable || el.getAttribute?.("contenteditable") === "true") {
+    lastActiveCompose = el;
+  }
+});
+
+// Cache selection on many events (Gmail drops selection easily)
+document.addEventListener("pointerdown", cacheSelectionNow, true);
+document.addEventListener("pointerup", cacheSelectionNow, true);
+document.addEventListener("mouseup", cacheSelectionNow, true);
+document.addEventListener("keyup", cacheSelectionNow, true);
+document.addEventListener("selectionchange", cacheSelectionNow, true);
+
+// ✅ Polling cache (most reliable for Gmail + popup focus loss)
+setInterval(() => {
+  cacheSelectionNow();
+}, 250);
+
 function getSelectionTextRobust() {
+  // 1) live selection
   try {
     const live = String(window.getSelection?.()?.toString() || "").trim();
     if (live) return live;
   } catch {}
 
+  // 2) cached selection
   if (cachedSelectionText) return cachedSelectionText;
+
   return "";
 }
 
-function isLikelyGmailEditor(node) {
-  if (!node) return false;
-  if (node.nodeType === Node.ELEMENT_NODE) {
-    const el = node;
-    if (el.isContentEditable) return true;
-    if (el.getAttribute?.("contenteditable") === "true") return true;
-  }
-  return false;
-}
-
-function replaceUsingExecCommand(link) {
-  try {
-    // Works when selection is still active
-    document.execCommand("insertText", false, link);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
+// Replace using cached range (best effort)
 function replaceUsingCachedRange(link) {
   try {
     if (!cachedRange) return false;
 
-    const range = cachedRange;
-
-    // Ensure range is still connected to DOM
-    const common = range.commonAncestorContainer;
-    const containerEl = common.nodeType === Node.ELEMENT_NODE ? common : common.parentElement;
-
+    const common = cachedRange.commonAncestorContainer;
+    const containerEl = common?.nodeType === Node.ELEMENT_NODE ? common : common?.parentElement;
     if (!containerEl || !document.contains(containerEl)) return false;
 
-    // Gmail editor often uses contenteditable divs — ensure we are inside something editable
+    // ensure in contenteditable tree
     let cur = containerEl;
     let okEditable = false;
     while (cur && cur !== document.body) {
@@ -88,36 +84,53 @@ function replaceUsingCachedRange(link) {
     }
     if (!okEditable) return false;
 
-    // Replace selected content
-    range.deleteContents();
-    range.insertNode(document.createTextNode(link));
+    cachedRange.deleteContents();
+    cachedRange.insertNode(document.createTextNode(link));
 
-    // Move caret to end of inserted link
-    range.collapse(false);
+    cachedRange.collapse(false);
     const sel = window.getSelection();
     sel.removeAllRanges();
-    sel.addRange(range);
+    sel.addRange(cachedRange);
 
+    // clear caches
+    cachedSelectionText = "";
+    cachedRange = null;
     return true;
   } catch {
     return false;
   }
 }
 
-// If we can't replace selection, fallback: insert at compose cursor
-function insertIntoComposeFallback(link) {
-  const editor =
-    document.activeElement?.isContentEditable
-      ? document.activeElement
-      : document.querySelector('[role="textbox"][contenteditable="true"]') ||
-        document.querySelector('div[aria-label][contenteditable="true"]');
+// Replace using execCommand (works if selection still active)
+function replaceUsingExecCommand(link) {
+  try {
+    // If selection is active, this overwrites it
+    const ok = document.execCommand("insertText", false, link);
+    if (ok) {
+      cachedSelectionText = "";
+      cachedRange = null;
+    }
+    return ok;
+  } catch {
+    return false;
+  }
+}
 
-  if (editor) {
+// Insert fallback (if no selection replace possible)
+function insertFallback(link) {
+  try {
+    const editor =
+      (document.activeElement && document.activeElement.isContentEditable && document.activeElement) ||
+      lastActiveCompose ||
+      document.querySelector('[role="textbox"][contenteditable="true"]');
+
+    if (!editor) return false;
     editor.focus();
     document.execCommand("insertText", false, link);
     return true;
+  } catch {
+    return false;
   }
-  return false;
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -129,45 +142,28 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         return;
       }
 
-      // ✅ Replace currently selected text with link
       if (msg?.type === "QM_REPLACE_SELECTION_WITH_LINK") {
         const url = String(msg.url || "").trim();
-        if (!url) {
-          sendResponse({ ok: false, error: "Missing url" });
-          return;
-        }
+        if (!url) return sendResponse({ ok: false, error: "Missing url" });
 
-        // 1) Try direct replace with current selection
-        const directOk = replaceUsingExecCommand(url);
-        if (directOk) {
-          // clear cache to avoid accidental reuse
-          cachedSelectionText = "";
-          cachedRange = null;
-          sendResponse({ ok: true });
-          return;
-        }
+        // 1) direct replace
+        if (replaceUsingExecCommand(url)) return sendResponse({ ok: true });
 
-        // 2) Try cached range (handles popup stealing focus)
-        const cachedOk = replaceUsingCachedRange(url);
-        if (cachedOk) {
-          cachedSelectionText = "";
-          cachedRange = null;
-          sendResponse({ ok: true });
-          return;
-        }
+        // 2) cached range replace
+        if (replaceUsingCachedRange(url)) return sendResponse({ ok: true });
 
-        // 3) Fallback insert (not perfect, but better than nothing)
-        const fallbackOk = insertIntoComposeFallback(url);
-        if (!fallbackOk) {
-          sendResponse({
-            ok: false,
-            error: "Could not replace selection. Re-select text in the compose body and try again."
+        // 3) fallback insert
+        if (insertFallback(url)) {
+          return sendResponse({
+            ok: true,
+            warning: "Inserted link, but could not replace selection. Re-select and try again for exact replace."
           });
-          return;
         }
 
-        sendResponse({ ok: true, warning: "Inserted link, but could not delete original selection." });
-        return;
+        return sendResponse({
+          ok: false,
+          error: "Select text in the email body first (compose body)."
+        });
       }
 
       sendResponse({ ok: false, error: "Unknown message" });
