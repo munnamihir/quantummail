@@ -1,18 +1,13 @@
+// portal/admin.js
 const API = window.location.origin;
+const $ = (id) => document.getElementById(id);
 
-function $(id) { return document.getElementById(id); }
+function setStatus(msg) { $("status").textContent = msg || ""; }
+function setError(msg) { $("error").textContent = msg || ""; }
 
-function setStatus(msg) { const el = $("status"); if (el) el.textContent = msg || ""; }
-function setError(msg) { const el = $("error"); if (el) el.textContent = msg || ""; }
-
-function showLoggedInUi(isLoggedIn) {
-  const loginBox = $("loginBox");
-  const actionsBox = $("actionsBox");
-  if (loginBox) loginBox.style.display = isLoggedIn ? "none" : "block";
-  if (actionsBox) actionsBox.style.display = isLoggedIn ? "block" : "none";
+function saveSession(session) {
+  localStorage.setItem("qm_admin_session", JSON.stringify(session));
 }
-
-function saveSession(session) { localStorage.setItem("qm_admin_session", JSON.stringify(session)); }
 function loadSession() {
   try { return JSON.parse(localStorage.getItem("qm_admin_session") || "null"); }
   catch { return null; }
@@ -24,7 +19,12 @@ async function apiFetch(path, { method = "GET", token = null, json = null } = {}
   if (token) headers.Authorization = `Bearer ${token}`;
   if (json) headers["Content-Type"] = "application/json";
 
-  const res = await fetch(`${API}${path}`, { method, headers, body: json ? JSON.stringify(json) : undefined });
+  const res = await fetch(`${API}${path}`, {
+    method,
+    headers,
+    body: json ? JSON.stringify(json) : undefined
+  });
+
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
   return data;
@@ -39,15 +39,14 @@ function escapeHtml(s) {
     .replaceAll("'", "&#039;");
 }
 
-// Keep last audit in memory for CSV download
-let lastAuditItems = [];
+function updatePills() {
+  const session = loadSession();
+  $("orgPill").textContent = session?.user?.orgId || $("orgId")?.value || "-";
+  $("sessionPill").textContent = session?.token ? `signed in as ${session.user.username}` : "signed out";
+}
 
-// -----------------------
-// Rendering
-// -----------------------
 function renderUsers(users) {
   const tb = $("usersTable")?.querySelector("tbody");
-  if (!tb) return;
   tb.innerHTML = "";
 
   for (const u of users) {
@@ -56,21 +55,21 @@ function renderUsers(users) {
       <td>${escapeHtml(u.userId)}</td>
       <td>${escapeHtml(u.username)}</td>
       <td>${escapeHtml(u.role)}</td>
-      <td>${escapeHtml(u.status)}</td>
+      <td>${escapeHtml(u.status || "Active")}</td>
       <td>${u.hasPublicKey ? "✅" : "❌"}</td>
     `;
     tb.appendChild(tr);
   }
 }
 
-function renderAudit(items) {
-  lastAuditItems = Array.isArray(items) ? items : [];
+let LAST_AUDIT = [];
 
+function renderAudit(items) {
+  LAST_AUDIT = Array.isArray(items) ? items : [];
   const tb = $("auditTable")?.querySelector("tbody");
-  if (!tb) return;
   tb.innerHTML = "";
 
-  for (const a of lastAuditItems) {
+  for (const a of LAST_AUDIT) {
     const details = { ...a };
     delete details.id;
     delete details.orgId;
@@ -84,7 +83,7 @@ function renderAudit(items) {
     tr.innerHTML = `
       <td>${escapeHtml(a.at)}</td>
       <td>${escapeHtml(a.action)}</td>
-      <td>${escapeHtml(a.userId)}</td>
+      <td>${escapeHtml(a.userId || "")}</td>
       <td><code>${escapeHtml(JSON.stringify(details))}</code></td>
       <td>${escapeHtml(a.ip || "")}</td>
     `;
@@ -92,86 +91,66 @@ function renderAudit(items) {
   }
 }
 
-// -----------------------
-// CSV download
-// -----------------------
-function csvEscape(v) {
-  const s = v == null ? "" : String(v);
-  return `"${s.replace(/"/g, '""')}"`;
-}
+function renderKeys(active, keys) {
+  const tb = $("keysTable")?.querySelector("tbody");
+  tb.innerHTML = "";
 
-function downloadTextFile(filename, text, mime = "text/csv") {
-  const blob = new Blob([text], { type: `${mime};charset=utf-8` });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
+  for (const k of keys) {
+    const isActive = String(k.version) === String(active);
+    const canRetire = !isActive && k.status !== "retired";
 
-function auditToCsv(items) {
-  const headers = ["time", "action", "userId", "ip", "userAgent", "details"];
-  const lines = [headers.map(csvEscape).join(",")];
-
-  for (const a of items) {
-    const detailsObj = { ...a };
-    delete detailsObj.id;
-    delete detailsObj.orgId;
-    delete detailsObj.userId;
-    delete detailsObj.action;
-    delete detailsObj.ip;
-    delete detailsObj.ua;
-    delete detailsObj.at;
-
-    const row = [
-      a.at || "",
-      a.action || "",
-      a.userId || "",
-      a.ip || "",
-      a.ua || "",
-      Object.keys(detailsObj).length ? JSON.stringify(detailsObj) : ""
-    ];
-
-    lines.push(row.map(csvEscape).join(","));
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${escapeHtml(k.version)}${isActive ? " ✅" : ""}</td>
+      <td>${escapeHtml(k.status)}</td>
+      <td>${escapeHtml(k.createdAt || "")}</td>
+      <td>${escapeHtml(k.activatedAt || "")}</td>
+      <td>${escapeHtml(k.retiredAt || "")}</td>
+      <td>
+        <button data-retire="${escapeHtml(k.version)}" ${canRetire ? "" : "disabled"}>Retire</button>
+      </td>
+    `;
+    tb.appendChild(tr);
   }
 
-  return lines.join("\n");
+  tb.querySelectorAll("button[data-retire]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const v = btn.getAttribute("data-retire");
+      try {
+        await retireKey(v);
+      } catch (e) {
+        setError(e.message || String(e));
+      }
+    });
+  });
 }
 
-// -----------------------
-// Actions
-// -----------------------
 async function seedAdmin() {
   setError("");
   setStatus("Seeding admin…");
-  const data = await apiFetch("/dev/seed-admin", {
-    method: "POST",
-    json: { orgId: "org_demo", username: "admin", password: "admin123" }
-  });
-  setStatus(`Seeded ✅ (${data.note || "created"})`);
+  const orgId = ($("orgId").value || "org_demo").trim();
+  const r = await apiFetch("/dev/seed-admin", { method: "POST", json: { orgId } });
+  setStatus(`Seeded ✅ Admin: ${r.admin} / ${r.password}`);
+  updatePills();
 }
 
 async function loginAdmin() {
   setError("");
-  setStatus("Logging in...");
+  setStatus("Logging in…");
 
-  const orgId = $("orgId")?.value.trim();
-  const username = $("username")?.value.trim();
-  const password = $("password")?.value;
+  const orgId = ($("orgId").value || "").trim();
+  const username = ($("username").value || "").trim();
+  const password = ($("password").value || "");
 
   if (!orgId || !username || !password) throw new Error("orgId, username, password required");
 
   const data = await apiFetch("/auth/login", { method: "POST", json: { orgId, username, password } });
-
   if (data?.user?.role !== "Admin") throw new Error("Not an admin user");
 
   saveSession({ token: data.token, user: data.user });
-  showLoggedInUi(true);
-
   setStatus("Logged in ✅");
+  updatePills();
+
   await refreshAll();
 }
 
@@ -180,14 +159,17 @@ async function refreshAll() {
   const session = loadSession();
   if (!session?.token) throw new Error("Not logged in");
 
-  setStatus("Loading users + audit...");
+  setStatus("Loading users + keys + audit…");
+  updatePills();
 
-  const [usersRes, auditRes] = await Promise.all([
+  const [usersRes, keysRes, auditRes] = await Promise.all([
     apiFetch("/admin/users", { token: session.token }),
-    apiFetch("/admin/audit?limit=200", { token: session.token })
+    apiFetch("/admin/keys", { token: session.token }),
+    apiFetch("/admin/audit?limit=300", { token: session.token })
   ]);
 
   renderUsers(usersRes.users || []);
+  renderKeys(keysRes.active, keysRes.keys || []);
   renderAudit(auditRes.items || []);
 
   setStatus("Updated ✅");
@@ -198,67 +180,101 @@ async function createMember() {
   const session = loadSession();
   if (!session?.token) throw new Error("Not logged in");
 
-  const newUsername = $("newUsername")?.value.trim();
-  const newPassword = $("newPassword")?.value;
-  const role = $("newRole")?.value || "Member";
+  const username = ($("newUsername").value || "").trim();
+  const password = ($("newPassword").value || "");
+  const role = ($("newRole").value || "Member").trim();
 
-  if (!newUsername || !newPassword) throw new Error("New username/password required");
+  if (!username || !password) throw new Error("New username/password required");
 
-  setStatus("Creating user...");
+  setStatus("Creating user…");
   await apiFetch("/admin/users", {
     method: "POST",
     token: session.token,
-    json: { username: newUsername, password: newPassword, role }
+    json: { username, password, role }
   });
 
   $("newUsername").value = "";
   $("newPassword").value = "";
+  $("newRole").value = "Member";
 
   setStatus("User created ✅");
   await refreshAll();
 }
 
+async function rotateKey() {
+  setError("");
+  const session = loadSession();
+  if (!session?.token) throw new Error("Not logged in");
+
+  setStatus("Rotating key…");
+  await apiFetch("/admin/keys/rotate", { method: "POST", token: session.token });
+  setStatus("Key rotated ✅");
+  await refreshAll();
+}
+
+async function retireKey(version) {
+  setError("");
+  const session = loadSession();
+  if (!session?.token) throw new Error("Not logged in");
+
+  setStatus(`Retiring key v${version}…`);
+  await apiFetch(`/admin/keys/${version}/retire`, { method: "POST", token: session.token });
+  setStatus(`Key v${version} retired ✅`);
+  await refreshAll();
+}
+
 function logout() {
   clearSession();
-  showLoggedInUi(false);
+  updatePills();
   setStatus("Logged out.");
   setError("");
   renderUsers([]);
+  renderKeys("-", []);
   renderAudit([]);
 }
 
-// -----------------------
-// Wire up
-// -----------------------
-document.addEventListener("DOMContentLoaded", async () => {
-  $("btnSeed")?.addEventListener("click", () => seedAdmin().catch(e => setError(e.message || String(e))));
-  $("btnLogin")?.addEventListener("click", () => loginAdmin().catch(e => setError(e.message || String(e))));
-  $("btnRefresh")?.addEventListener("click", () => refreshAll().catch(e => setError(e.message || String(e))));
-  $("btnCreateUser")?.addEventListener("click", () => createMember().catch(e => setError(e.message || String(e))));
-  $("btnLogout")?.addEventListener("click", logout);
+function downloadAuditCsv() {
+  const headers = ["at", "action", "userId", "ip", "details"];
+  const rows = [headers];
 
-  $("btnDownloadAudit")?.addEventListener("click", () => {
-    try {
-      if (!lastAuditItems.length) {
-        alert("No audit log loaded yet. Click Refresh first.");
-        return;
-      }
-      const session = loadSession();
-      const org = session?.user?.orgId || "org";
-      const ts = new Date().toISOString().replace(/[:.]/g, "-");
-      const filename = `quantummail-audit-${org}-${ts}.csv`;
-      downloadTextFile(filename, auditToCsv(lastAuditItems));
-    } catch (e) {
-      setError(e.message || String(e));
-    }
-  });
+  for (const a of LAST_AUDIT) {
+    const json = JSON.stringify(a);
+    const row = [
+      a.at || "",
+      a.action || "",
+      a.userId || "",
+      a.ip || "",
+      json
+    ].map((v) => `"${String(v).replaceAll('"', '""')}"`);
 
-  // Auto-load if already logged in
-  const session = loadSession();
-  if (session?.token) {
-    showLoggedInUi(true);
-    refreshAll().catch(() => {});
-  } else {
-    showLoggedInUi(false);
+    rows.push(row);
   }
+
+  const csv = rows.map((r) => r.join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `quantummail-audit-${new Date().toISOString().slice(0,19).replaceAll(":","-")}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+
+  URL.revokeObjectURL(url);
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  updatePills();
+
+  $("btnSeed").addEventListener("click", () => seedAdmin().catch((e) => setError(e.message || String(e))));
+  $("btnLogin").addEventListener("click", () => loginAdmin().catch((e) => setError(e.message || String(e))));
+  $("btnRefresh").addEventListener("click", () => refreshAll().catch((e) => setError(e.message || String(e))));
+  $("btnCreateUser").addEventListener("click", () => createMember().catch((e) => setError(e.message || String(e))));
+  $("btnRotateKey").addEventListener("click", () => rotateKey().catch((e) => setError(e.message || String(e))));
+  $("btnLogout").addEventListener("click", logout);
+  $("btnDownloadLog").addEventListener("click", downloadAuditCsv);
+
+  const session = loadSession();
+  if (session?.token) refreshAll().catch(() => {});
 });

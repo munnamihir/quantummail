@@ -118,21 +118,38 @@ export async function importPublicSpkiB64(publicKeySpkiB64) {
   );
 }
 
+/**
+ * Register user's public key with server so others can wrap DEKs for them.
+ * Server endpoint (new): POST /org/register-key
+ * Back-compat endpoint: POST /pubkey_register (optional alias)
+ */
 export async function ensureKeypairAndRegister(serverBase, token) {
   const { publicKey } = await getOrCreateRsaKeypair();
   const publicKeySpkiB64 = await exportPublicSpkiB64(publicKey);
 
-  const res = await fetch(`${serverBase}/users/me/pubkey`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({ publicKeySpkiB64 })
-  });
+  async function tryRegister(path) {
+    const res = await fetch(`${serverBase}${path}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ publicKeySpkiB64 })
+    });
 
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error || `pubkey_register failed (${res.status})`);
+    const data = await res.json().catch(() => ({}));
+    return { res, data };
+  }
+
+  // 1) Preferred endpoint
+  let out = await tryRegister("/org/register-key");
+  if (out.res.ok) return;
+
+  // 2) Back-compat alias
+  out = await tryRegister("/pubkey_register");
+  if (out.res.ok) return;
+
+  throw new Error(out.data?.error || `pubkey_register failed (${out.res.status})`);
 }
 
 // AES-GCM envelope encryption

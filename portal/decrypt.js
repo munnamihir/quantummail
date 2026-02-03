@@ -11,13 +11,18 @@ function getMsgIdFromPath() {
 function ok(msg) { $("ok").textContent = msg || ""; }
 function err(msg) { $("err").textContent = msg || ""; }
 
+function setBusy(busy) {
+  const btn = $("btnDecrypt");
+  btn.disabled = !!busy;
+  btn.textContent = busy ? "Decrypting…" : "Decrypt";
+}
+
 const msgId = getMsgIdFromPath();
 $("msgId").textContent = msgId || "-";
 
-function setBusy(isBusy) {
-  $("btnDecrypt").disabled = !!isBusy;
-  $("btnDecrypt").textContent = isBusy ? "Decrypting…" : "Decrypt";
-}
+// Auto-fill server base to current origin
+$("serverBase").value = window.location.origin;
+$("serverBase").readOnly = true;
 
 function requestDecrypt() {
   ok(""); err("");
@@ -38,7 +43,6 @@ function requestDecrypt() {
   setBusy(true);
   ok("Contacting extension…");
 
-  // Send creds to extension (content script bridge)
   window.postMessage(
     {
       source: "quantummail-portal",
@@ -52,14 +56,17 @@ function requestDecrypt() {
     "*"
   );
 
-  // If extension isn't installed, we’ll timeout with a helpful error.
-  const t = setTimeout(() => {
+  const timeout = setTimeout(() => {
     setBusy(false);
-    err("QuantumMail extension not detected. Please install/enable the extension and refresh.");
+    err(
+      "QuantumMail extension not detected.\n" +
+      "1) Install/enable the extension\n" +
+      "2) Refresh this page\n" +
+      "3) Try again"
+    );
   }, 4000);
 
-  // We clear this timeout when result arrives
-  window.__qmDecryptTimeout = t;
+  window.__qmDecryptTimeout = timeout;
 }
 
 window.addEventListener("message", (event) => {
@@ -84,7 +91,6 @@ window.addEventListener("message", (event) => {
 
 $("btnDecrypt").addEventListener("click", requestDecrypt);
 
-// Enter key submits
-$("password").addEventListener("keydown", (e) => {
+$("password")?.addEventListener("keydown", (e) => {
   if (e.key === "Enter") requestDecrypt();
 });
